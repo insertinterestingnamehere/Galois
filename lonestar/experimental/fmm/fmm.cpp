@@ -138,8 +138,6 @@ constexpr galois::MethodFlag no_lockable_flag = galois::MethodFlag::UNPROTECTED;
 // could just be pre-computed, but that'd noticeably increase
 // storage requirements.
 // TODO: Try caching sweep directions and see if it's any better.
-using edge_t = std::array<double, 3>;
-// using edge_t = void;
 
 // Both these limitations could be lifted,
 // but in the interest of keeping the buffer management
@@ -167,7 +165,7 @@ struct NodeData {
 
 // No fine-grained locks built into the graph.
 // Use atomics for ALL THE THINGS!
-using Graph = galois::graphs::LC_CSR_Graph<NodeData, edge_t>
+using Graph = galois::graphs::LC_CSR_Graph<NodeData, void>
                 ::with_no_lockable<true>::type
                 ;
 using GNode = Graph::GraphNode;
@@ -344,10 +342,7 @@ auto generate_grid(Graph& built_graph, std::size_t nx, std::size_t ny,
   std::size_t num_edges       = 6 * nx * ny * nz + num_outer_faces;
   temp_graph.setNumNodes(num_nodes);
   temp_graph.setNumEdges(num_edges);
-  temp_graph.setSizeofEdgeData(
-      galois::LargeArray<Graph::edge_data_type>::size_of::value);
-  galois::LargeArray<Graph::edge_data_type> edge_data;
-  edge_data.create(num_edges);
+  temp_graph.setSizeofEdgeData(0);
 
   // Interior cells will have degree 6
   // since they will have either other cells or
@@ -391,47 +386,46 @@ auto generate_grid(Graph& built_graph, std::size_t nx, std::size_t ny,
         // (i, j, k) = (z, x, y)
         std::size_t id = i * nx * ny + j * ny + k;
         if (i > 0) {
-          edge_data.set(temp_graph.addNeighbor(id, id - ny * nz),
-                        {-1., 0., 0.});
+          temp_graph.addNeighbor(id, id - ny * nz);
         } else {
           std::size_t ghost_id = yz_low_face_start + j * nz + k;
-          edge_data.set(temp_graph.addNeighbor(ghost_id, id), {1., 0., 0.});
-          edge_data.set(temp_graph.addNeighbor(id, ghost_id), {-1., 0., 0.});
+          temp_graph.addNeighbor(ghost_id, id);
+          temp_graph.addNeighbor(id, ghost_id);
         }
         if (i < nx - 1) {
-          edge_data.set(temp_graph.addNeighbor(id, id + ny * nz), {1., 0., 0.});
+          temp_graph.addNeighbor(id, id + ny * nz);
         } else {
           std::size_t ghost_id = yz_high_face_start + j * nz + k;
-          edge_data.set(temp_graph.addNeighbor(ghost_id, id), {-1., 0., 0.});
-          edge_data.set(temp_graph.addNeighbor(id, ghost_id), {1., 0., 0.});
+          temp_graph.addNeighbor(ghost_id, id);
+          temp_graph.addNeighbor(id, ghost_id);
         }
         if (j > 0) {
-          edge_data.set(temp_graph.addNeighbor(id, id - nz), {0., -1., 0.});
+          temp_graph.addNeighbor(id, id - nz);
         } else {
           std::size_t ghost_id = xz_low_face_start + i * nz + k;
-          edge_data.set(temp_graph.addNeighbor(ghost_id, id), {0., 1., 0.});
-          edge_data.set(temp_graph.addNeighbor(id, ghost_id), {0., -1., 0.});
+          temp_graph.addNeighbor(ghost_id, id);
+          temp_graph.addNeighbor(id, ghost_id);
         }
         if (j < ny - 1) {
-          edge_data.set(temp_graph.addNeighbor(id, id + nz), {0., 1., 0.});
+          temp_graph.addNeighbor(id, id + nz);
         } else {
           std::size_t ghost_id = xz_high_face_start + i * nz + k;
-          edge_data.set(temp_graph.addNeighbor(ghost_id, id), {0., -1., 0.});
-          edge_data.set(temp_graph.addNeighbor(id, ghost_id), {0., 1., 0.});
+          temp_graph.addNeighbor(ghost_id, id);
+          temp_graph.addNeighbor(id, ghost_id);
         }
         if (k > 0) {
-          edge_data.set(temp_graph.addNeighbor(id, id - 1), {0., 0., -1.});
+          temp_graph.addNeighbor(id, id - 1);
         } else {
           std::size_t ghost_id = xy_low_face_start + i * ny + j;
-          edge_data.set(temp_graph.addNeighbor(ghost_id, id), {0., 0., 1.});
-          edge_data.set(temp_graph.addNeighbor(id, ghost_id), {0., 0., -1.});
+          temp_graph.addNeighbor(ghost_id, id);
+          temp_graph.addNeighbor(id, ghost_id);
         }
         if (k < nz - 1) {
-          edge_data.set(temp_graph.addNeighbor(id, id + 1), {0., 0., 1.});
+          temp_graph.addNeighbor(id, id + 1);
         } else {
           std::size_t ghost_id = xy_high_face_start + i * ny + j;
-          edge_data.set(temp_graph.addNeighbor(ghost_id, id), {0., 0., -1.});
-          edge_data.set(temp_graph.addNeighbor(id, ghost_id), {0., 0., 1.});
+          temp_graph.addNeighbor(ghost_id, id);
+          temp_graph.addNeighbor(id, ghost_id);
         }
       }
     }
@@ -439,10 +433,11 @@ auto generate_grid(Graph& built_graph, std::size_t nx, std::size_t ny,
 
   // TODO: is it possible to set the edge data
   // during construction without copying here?
-  auto* rawEdgeData = temp_graph.finish<Graph::edge_data_type>();
-  std::uninitialized_copy(std::make_move_iterator(edge_data.begin()),
-                          std::make_move_iterator(edge_data.end()),
-                          rawEdgeData);
+  temp_graph.finish<Graph::edge_data_type>();
+  //auto* rawEdgeData = temp_graph.finish<Graph::edge_data_type>();
+  //std::uninitialized_copy(std::make_move_iterator(edge_data.begin()),
+  //                        std::make_move_iterator(edge_data.end()),
+  //                        rawEdgeData);
 
   galois::graphs::readGraph(built_graph, temp_graph);
   return std::make_tuple(num_nodes, num_cells, num_outer_faces,
@@ -451,64 +446,7 @@ auto generate_grid(Graph& built_graph, std::size_t nx, std::size_t ny,
                          xz_low_face_start, xz_high_face_start);
 }
 
-// Series of asserts to check that the graph construction
-// code is actually working.
-void assert_face_directions(Graph& graph, std::size_t num_nodes,
-                            std::size_t num_cells,
-                            std::size_t num_outer_faces) noexcept {
-#if !defined(NDEBUG)
-
-  assert(("arithmetic error in mesh generation.",
-          num_cells + num_outer_faces == num_nodes));
-  assert(("Mismatch between graph size and number of nodes",
-          num_nodes == graph.size()));
-  for (auto node : graph) {
-    // std::distance ought to work on the edge iterator,
-    // but it doesn't, so count the degree manually.
-    // TODO: fix this in the library.
-    std::size_t degree = 0;
-    // Note: Rely on node type to decay to std::size_t here.
-    // This is a feature of the Galois CSR graph, but it's
-    // not necessarily true when using other graph types.
-    assert(("Unexpectedly large node id.", node < num_nodes));
-    for (auto edge : graph.edges(node, galois::MethodFlag::UNPROTECTED)) {
-      // More verification is possible, but here's a sanity check.
-      // Confirm that edges coming back the other direction
-      // have edge data that is the negative of the edge data
-      // on the outgoing edge.
-      auto& edge_data  = graph.getEdgeData(edge);
-      auto destination = graph.getEdgeDst(edge);
-      for (auto neighbor_edge :
-           graph.edges(destination, galois::MethodFlag::UNPROTECTED)) {
-        if (graph.getEdgeDst(neighbor_edge) == node) {
-          auto& back_edge_data = graph.getEdgeData(neighbor_edge);
-          for (std::size_t i = 0; i < 3; i++) {
-            assert(("Back edge must be the negative of the forward edge.",
-                    edge_data[i] == -back_edge_data[i]));
-          }
-          goto back_edge_found;
-        }
-      }
-      // If loop exits without jumping past this assert,
-      // no back edge was found.
-      assert(("Edge with no back edge found.", false));
-    back_edge_found:;
-      degree++;
-    }
-    assert(
-        ("Found node with incorrect degree. "
-         "Interior nodes should all have "
-         "degree 6 and boundary nodes "
-         "should all have degree 1.",
-         degree == 6 && node < num_cells || degree == 1 && node >= num_cells));
-  }
-
-#endif // !defined(NDEBUG)
-}
-
-
 ///////////////////////////////////////////////////////////////////////////////
-
 
 void initCells(Graph& graph, size_t num_cells) {
   galois::do_all(
@@ -622,11 +560,10 @@ double solveQuadratic(Graph& graph, GNode node, double sln, const double speed) 
 
 void FastMarching(Graph& graph, WL& initBag) {
   auto Indexer = [&](const double& sln) {
-    unsigned t = std::round(sln);
-    // unsigned t = sln / 4;
+    unsigned t = std::round(sln * 32);
     return t;
   };
-  using PSchunk = galois::worklists::PerSocketChunkLIFO<1>; // chunk size 16
+  using PSchunk = galois::worklists::PerSocketChunkLIFO<32>; // chunk size 16
   using OBIM    = galois::worklists::OrderedByIntegerMetric<decltype(Indexer), PSchunk>;
 
 galois::runtime::profileVtune(
@@ -692,6 +629,18 @@ void SanityCheck(Graph& graph) {
     galois::loopname("sanityCheck"));
 }
 
+void SanityCheck2(Graph& graph) {
+  auto tolerance = 2. / nh;
+  galois::do_all(
+    galois::iterate(0ul, NUM_CELLS),
+    [&](GNode node) noexcept {
+      auto [x, y, z] = getCoord(node);
+      auto &solution = graph.getData(node).solution;
+      assert(std::abs(solution - std::sqrt(x * x + y * y + z * z)));
+    },
+    galois::no_stats(),
+    galois::loopname("sanityCheck2"));
+}
 
 void _sanity_coord() {
   for (GNode i = 0; i < NUM_CELLS; i++) {
@@ -716,7 +665,6 @@ int main(int argc, char** argv) noexcept {
 
   auto [num_nodes, num_cells, num_outer_faces, xy_low, xy_high, yz_low, yz_high,
         xz_low, xz_high] = generate_grid(graph, nx, ny, nz);
-  assert_face_directions(graph, num_nodes, num_cells, num_outer_faces);
 
   // _sanity_coord();
 
@@ -724,8 +672,8 @@ int main(int argc, char** argv) noexcept {
 
   // TODO boundary settings
   WL boundary, initBag;
-  AssignBoundary(graph, boundary);
-  // AssignBoundary(boundary);
+  //AssignBoundary(graph, boundary);
+  AssignBoundary(boundary);
   assert(!boundary.empty() && "Boundary not defined!");
 
   //  using HeapElemTy = std::pair<GNode, double>;
@@ -760,6 +708,7 @@ int main(int argc, char** argv) noexcept {
   Tmain.stop();
 
   SanityCheck(graph);
+  //SanityCheck2(graph);
 
   return 0;
 }
