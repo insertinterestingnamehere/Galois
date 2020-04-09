@@ -54,6 +54,19 @@ static char const* desc =
 static char const* url = "";
 
 using CoordTy = double;
+using SlnTy = double;
+
+enum Algo { Serial = 0, Parallel };
+
+const char* const ALGO_NAMES[] = { "serial", "parallel" };
+
+static llvm::cl::opt<Algo>
+    algo("algo", llvm::cl::desc("Choose an algorithm:"),
+         llvm::cl::values(
+           clEnumVal(Serial, "Serial"),
+           clEnumVal(Parallel, "Parallel"),
+           clEnumValEnd),
+         llvm::cl::init(Serial));
 static llvm::cl::opt<unsigned long long> nh{
     "nh", llvm::cl::desc("number of cells in ALL direction"),
     llvm::cl::init(0u)};
@@ -115,7 +128,7 @@ static CoordTy dx, dy, dz;
 // Idk why this hasn't been standardized in C++ yet, but here it is.
 static constexpr double PI =
     3.1415926535897932384626433832795028841971693993751;
-constexpr double INF = std::numeric_limits<double>::max();
+constexpr SlnTy INF = std::numeric_limits<SlnTy>::max();
 constexpr galois::MethodFlag no_lockable_flag = galois::MethodFlag::UNPROTECTED;
 
 // TODO: In Galois, we need a graph type with dynamically sized
@@ -468,7 +481,7 @@ void initBoundary(Graph& graph, WL& boundary) {
     [&](GNode node) noexcept {
       auto& curData = graph.getData(node, galois::MethodFlag::UNPROTECTED);
       curData.tag = KNOWN;
-      curData.solution = BoundaryCondition();
+      curData.solution = BoundaryCondition(getCoord(node));
     },
     galois::no_stats(),
     galois::loopname("initializeBoundary"));
@@ -490,6 +503,7 @@ void initializeBag(Graph& graph, WL& boundary, WL& initBag) {
     galois::loopname("initializeBag"));
 }
 
+
 // void updateNeighbors() {}
 
 auto checkDirection(Graph& graph, GNode node, double sln, Graph::edge_iterator dir) {
@@ -498,19 +512,19 @@ auto checkDirection(Graph& graph, GNode node, double sln, Graph::edge_iterator d
                      std::distance(graph.edge_begin(node, no_lockable_flag), graph.edge_end(node, no_lockable_flag)) );
     GALOIS_DIE("invalid direction");
   }
-  GNode upwind = node;
+  // GNode upwind = node;
   GNode neighbor = graph.getEdgeDst(dir);
   auto& first_data = graph.getData(neighbor, no_lockable_flag);
   if (first_data.solution < sln) {
     sln = first_data.solution;
-    upwind = neighbor;
+    // upwind = neighbor;
   }
   std::advance(dir, 1); // opposite direction of the same dimension
   if (dir != graph.edge_end(node, no_lockable_flag)) {
     neighbor = graph.getEdgeDst(dir);
     auto& second_data = graph.getData(neighbor, no_lockable_flag);
     if (second_data.solution < sln) {
-      upwind = neighbor;
+      // upwind = neighbor;
       sln = second_data.solution;
     }
   }
@@ -534,6 +548,7 @@ double solveQuadratic(Graph& graph, GNode node, double sln, const double speed) 
       s = 0.;
     std::advance(dir, 2);
   }
+  galois::gDebug("solveQuadratic: ", solutions[0], " ", solutions[1], " ", solutions[2]);
   for (; non_zero_counter > 0; non_zero_counter--) {
     auto max_sln_it = std::max_element(solutions.begin(), solutions.end());
     double a(0.), b(0.), c(0.);
@@ -558,9 +573,243 @@ double solveQuadratic(Graph& graph, GNode node, double sln, const double speed) 
   return sln;
 }
 
+auto SerialCheckDirection(Graph& graph, GNode node, double center_sln, Graph::edge_iterator dir) {
+  SlnTy sln = 0;
+  if (dir >= graph.edge_end(node, no_lockable_flag)) {
+    galois::gDebug(node, (graph.getData(node, no_lockable_flag).is_ghost? " ghost":" non-ghost"), " ",
+                     std::distance(graph.edge_begin(node, no_lockable_flag), graph.edge_end(node, no_lockable_flag)) );
+    GALOIS_DIE("invalid direction");
+  }
+  GNode upwind = node;
+  GNode neighbor = graph.getEdgeDst(dir);
+  auto& first_data = graph.getData(neighbor, no_lockable_flag);
+  // galois::gDebug("Check neighbor ", neighbor, (int)first_data.tag);
+  if (first_data.tag == KNOWN) {
+    sln = first_data.solution;
+    upwind = neighbor;
+  }
+  std::advance(dir, 1); // opposite direction of the same dimension
+  if (dir != graph.edge_end(node, no_lockable_flag)) {
+    neighbor = graph.getEdgeDst(dir);
+    auto& second_data = graph.getData(neighbor, no_lockable_flag);
+    // galois::gDebug("Check neighbor ", neighbor, (int)second_data.tag);
+    if (second_data.tag == KNOWN) {
+      upwind = neighbor;
+      sln = second_data.solution;
+    }
+  }
+  if (upwind == node)
+    return std::make_pair(0., 0.);
+  return std::make_pair(sln, dx);
+}
+
+double SerialSolveQuadratic(Graph& graph, GNode node, double sln, const double speed) {
+  // TODO oarameterize dimension 3
+  std::array<std::pair<double, double>, 3> sln_delta {
+                                            std::make_pair(0., dx),
+                                            std::make_pair(0., dy),
+                                            std::make_pair(0., dz)
+                                          };
+  // int non_zero_counter = 0;
+  auto dir = graph.edge_begin(node, no_lockable_flag);
+  for (auto& p : sln_delta) {
+    if (dir == graph.edge_end(node, no_lockable_flag))
+      break;
+    double& s = p.first;
+    double& d = p.second;
+    auto [si, di] = SerialCheckDirection(graph, node, sln, dir);
+    if (di) {
+      s = si;
+      // non_zero_counter++;
+    }
+    else {
+      // s = 0.; // already there
+      d = 0.;
+    }
+    std::advance(dir, 2);
+  }
+  // galois::gDebug("SerialSolveQuadratic: ", sln_delta[0].second, " ", sln_delta[1].second, " ", sln_delta[2].second);
+  // for (; non_zero_counter > 0; non_zero_counter--) {
+    // auto max_sln_it = std::max_element(solutions.begin(), solutions.end());
+    double a(0.), b(0.), c(0.);
+    for (const auto& p : sln_delta) {
+      const double& s = p.first, d = p.second;
+      galois::gDebug(s, " ", d);
+      double temp = d == 0? 0. : 1. / (d * d); // TODO delta
+      a += temp;
+      temp *= s;
+      b += temp;
+      temp *= s;
+      c += temp;
+      // galois::gDebug(temp, " ", a, " ", b, " ", c);
+    }
+    b *= -2.;
+    c -= (1. / (speed * speed));
+    double del = b * b - (4. * a * c);
+    galois::gDebug(a, " ", b, " ", c, " del=", del);
+    if (del >= 0) {
+      double new_sln = (-b + std::sqrt(del)) / (2. * a);
+      galois::gDebug("new solution: ", new_sln);
+      // if (new_sln > *max_sln_it)
+      //  sln = std::min(sln, new_sln); // TODO atomic here?
+      return new_sln;
+    }
+    // *max_sln_it = 0.;
+  // }
+  return INF;
+}
+
+/////
+// serial
+template <typename Graph, typename BL, typename WL>
+void SerialInitializeBag(Graph& graph, BL& boundary, WL& wl) {
+  for (GNode node : boundary) {
+    for (auto e : graph.edges(node, no_lockable_flag)) {
+      GNode dst = graph.getEdgeDst(e);
+      if (dst < NUM_CELLS) {
+        auto& dstData = graph.getData(dst, no_lockable_flag);
+        if (!dstData.is_ghost && dstData.tag != KNOWN) {
+          assert(dstData.solution == INF && dstData.tag == FAR);
+          SlnTy old_sln = dstData.solution;
+          double sln_temp = SerialSolveQuadratic(graph, dst, old_sln, dstData.speed);
+          if (sln_temp < old_sln) {
+            galois::gDebug("Hi! I'm ", dst, " ", sln_temp);
+            dstData.solution = sln_temp;
+            dstData.tag = BAND;
+            auto iter = wl.lower_bound(old_sln);
+            for (; iter != wl.end(); iter++) {
+              if (iter->second == dst)
+                break;
+              if (iter->first != sln_temp) {
+                iter = wl.end();
+                break;
+              }
+            }
+            if (iter == wl.end()) {
+              wl.insert({sln_temp, dst});
+            } else {
+              auto nh = wl.extract(iter); // node handle
+              nh.key() = sln_temp;
+              wl.insert(std::move(nh));
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+template <typename Graph, typename WL>
+void SerialFastMarching(Graph& graph, WL& wl) {
+  double max_error = 0;
+  while (!wl.empty()) {
+    auto beg = wl.begin();
+    GNode node = beg->second;
+    // SlnTy old_sln = beg.first;
+    assert(node < NUM_CELLS && "Ghost Point!");
+    auto& curData = graph.getData(node, galois::MethodFlag::UNPROTECTED);
+#ifndef NDEBUG
+    {
+      auto [x, y, z] = getCoord(node);
+      galois::gDebug("Hi! I'm ", node, " (", x, " ", y, " ", z, " ) with ", curData.solution);
+    }
+    if (curData.tag != BAND) {
+      galois::gDebug(node, " in heap with tag ", curData.tag);
+      std::abort();
+    }
+
+    if (curData.solution != beg->first) {
+      galois::gDebug("Wrong entry in the heap! ", beg->second, " ", beg->first, " but ", curData.solution);
+      for(auto i : wl) {
+        if (i.second == node)
+          galois::gDebug(i.first);
+      }
+      std::abort();
+    }
+    if (curData.is_ghost) {
+      // should not get here, asserted before
+      std::abort();
+    }
+
+    {
+      auto [x, y, z] = getCoord(node);
+      if (curData.solution - std::sqrt(x * x + y * y + z * z) > max_error)
+        max_error = curData.solution - std::sqrt(x * x + y * y + z * z);
+      if (curData.solution - std::sqrt(x * x + y * y + z * z) > 0.2) {
+        galois::gDebug(curData.solution - std::sqrt(x * x + y * y + z * z),
+          " - wrong distance, should be ", std::sqrt(x * x + y * y + z * z));
+        assert(false);
+      }
+    }
+#endif
+    curData.tag = KNOWN;
+    // TODO Delta stepping squeezes in here
+    wl.erase(beg);
+
+    // UpdateNeighbors
+    for (auto e : graph.edges(node, no_lockable_flag)) {
+      GNode dst = graph.getEdgeDst(e);
+      if (dst < NUM_CELLS) {
+        auto& dstData = graph.getData(dst, no_lockable_flag);
+        if (!dstData.is_ghost && dstData.tag != KNOWN) {
+          {
+            auto [x, y, z] = getCoord(dst);
+            galois::gDebug("Update ", dst, " (", x, " ", y, " ", z, " )");
+          }
+          // assert(dstData.solution == INF && dstData.tag == FAR);
+          SlnTy old_sln = dstData.solution;
+          double sln_temp = SerialSolveQuadratic(graph, dst, old_sln, dstData.speed);
+          if (sln_temp < old_sln) {
+            dstData.solution = sln_temp;
+            dstData.tag = BAND;
+            auto iter = wl.lower_bound(old_sln);
+            for (; iter != wl.end(); std::advance(iter, 1)) {
+              if (dst == 274) {
+                galois::gDebug("274: ", old_sln, " iter: ", iter->first, " ", iter->second);
+              }
+              if (iter->second == dst) {
+              if (dst == 274) {
+                galois::gDebug("274 catch: ", old_sln, " iter: ", iter->first, " ", iter->second);
+              }
+                
+                break;
+              }
+              if (iter->first != old_sln) {
+                iter = wl.end();
+                break;
+              }
+            }
+              if (dst == 274) {
+                galois::gDebug("274 finished: ", old_sln, " iter: ", iter->first, " ", iter->second);
+              }
+            if (iter == wl.end()) {
+              if (dst == 274) {
+                galois::gDebug("dumping heap ...");
+                for (auto i : wl) {
+                  galois::gDebug(i.first, " ", i.second);
+                  assert(i.second != 274);
+                }
+                galois::gDebug(dstData.tag);
+                assert(dstData.tag == BAND);
+              }
+              wl.insert({sln_temp, dst});
+            } else {
+              if (dst == 274) assert(dstData.tag == BAND);
+              auto nh = wl.extract(iter); // node handle
+              nh.key() = sln_temp;
+              wl.insert(std::move(nh));
+            }
+          }
+        }
+      }
+    }
+  }
+  galois::gDebug("max error: ", max_error);
+}
+
 void FastMarching(Graph& graph, WL& initBag) {
   auto Indexer = [&](const double& sln) {
-    unsigned t = std::round(sln * 32);
+    unsigned t = std::round(sln * 128);
     return t;
   };
   using PSchunk = galois::worklists::PerSocketChunkLIFO<32>; // chunk size 16
@@ -574,7 +823,8 @@ galois::runtime::profileVtune(
       assert(node < NUM_CELLS && "Ghost Point!");
       auto& curData = graph.getData(node, galois::MethodFlag::UNPROTECTED);
       if (curData.is_ghost) {
-        return;
+        // should not get here, asserted before
+        std::abort();
       }
       // assert(curData.tag == BAND);
       // if (curData.tag != KNOWN) {
@@ -618,19 +868,58 @@ galois::runtime::profileVtune(
 }
 
 void SanityCheck(Graph& graph) {
+  galois::GReduceMax<double> max_error;
+
   galois::do_all(
     galois::iterate(0ul, NUM_CELLS),
     [&](GNode node) noexcept {
+      if (node >= NUM_CELLS)
+        return;
       auto& curData = graph.getData(node, galois::MethodFlag::UNPROTECTED);
-      double sln_temp = solveQuadratic(graph, node, curData.solution, curData.speed);
-      assert(sln_temp >= curData.solution);
+      if (curData.solution == INF) {
+        galois::gPrint("Untouched cell: ", node, "\n");
+        return;
+      }
+
+      SlnTy val = 0.;
+      std::array<double, 3> dims { dx, dy, dz }; // TODO not exactly x y z order
+      auto dir = graph.edge_begin(node, no_lockable_flag);
+      for (double& d : dims) {
+        if (dir == graph.edge_end(node, no_lockable_flag))
+          break;
+        GNode neighbor = graph.getEdgeDst(dir);
+        auto& first_data = graph.getData(neighbor, no_lockable_flag);
+        assert(first_data.is_ghost || first_data.tag == KNOWN);
+        std::advance(dir, 1); // opposite direction of the same dimension
+        assert(dir != graph.edge_end(node, no_lockable_flag));
+        neighbor = graph.getEdgeDst(dir);
+        auto& second_data = graph.getData(neighbor, no_lockable_flag);
+        assert(second_data.is_ghost || second_data.tag == KNOWN);
+        SlnTy
+          s1 = (curData.solution - first_data.solution) / d,
+          s2 = (curData.solution - second_data.solution) / d;
+        val += std::pow(std::max(0., std::max(s1, s2)), 2);
+        std::advance(dir, 1);
+      }
+      auto tolerance = 2.e-1;
+      SlnTy error = std::sqrt(val) * curData.speed - 1.;
+      max_error.update(error);
+      if (error > tolerance) {
+        auto [x, y, z] = getCoord(node);
+        galois::gPrint("Upwind structure violated at cell: ", node,
+                        " (", x, " ", y, " ", z, ")",
+                        " with ", curData.solution, " of error ", error,
+                        " (", std::sqrt(x * x + y * y + z * z), ")\n");
+        return;
+      }
     },
     galois::no_stats(),
     galois::loopname("sanityCheck"));
+
+  galois::gPrint("max err: ", max_error.reduce());
 }
 
 void SanityCheck2(Graph& graph) {
-  auto tolerance = 2. / nh;
   galois::do_all(
     galois::iterate(0ul, NUM_CELLS),
     [&](GNode node) noexcept {
@@ -649,41 +938,57 @@ void _sanity_coord() {
   }
 }
 
-int main(int argc, char** argv) noexcept {
-  galois::SharedMemSys galois_system;
-  LonestarStart(argc, argv, name, desc, url);
-
-  Graph graph;
-  
-
-  if (nh) nx = ny = nz = nh;
-  NUM_CELLS = nh? nh * nh * nh : nx * ny * nz;
-  dx = (xb - xa) / CoordTy(nx + 1);
-  dy = (yb - ya) / CoordTy(ny + 1);
-  dz = (zb - za) / CoordTy(nz + 1);
-  galois::gDebug(dx, " - ", dy, " - ", dz);
-
-  auto [num_nodes, num_cells, num_outer_faces, xy_low, xy_high, yz_low, yz_high,
-        xz_low, xz_high] = generate_grid(graph, nx, ny, nz);
-
-  // _sanity_coord();
-
-  initCells(graph, num_cells);
-
-  // TODO boundary settings
-  WL boundary, initBag;
-  //AssignBoundary(graph, boundary);
-  AssignBoundary(boundary);
-  assert(!boundary.empty() && "Boundary not defined!");
-
-  //  using HeapElemTy = std::pair<GNode, double>;
+template<typename Graph, typename WL>
+void serial(Graph& graph, WL& boundary) {
+  //  using HeapElemTy = std::pair<GNode, double>
   //  auto heapCmp = [&](HeapElemTy a, HeapElemTy b) { return a.second < b.second; }
   //  using HeapTy = galois::MinHeap<std::pair<GNode, double>>
+  using HeapTy = std::multimap<SlnTy, GNode>;
+  HeapTy wl;
 
-  initBoundary(graph, boundary);
+  SerialInitializeBag(graph, boundary, wl);
 
-  galois::StatTimer Tmain;
-  Tmain.start();
+  if (wl.empty()) {
+    galois::gDebug("No cell to be processed!");
+    std::abort();
+  } else {
+#ifndef NDEBUG
+  galois::gDebug("vvvvvvvv init band vvvvvvvv");
+  for (auto i : wl) {
+    auto coords = getCoord(i.second);
+    galois::gDebug(i.second, " (", coords[0], " ", coords[1], " ", coords[2], ") with ", i.first);
+  }
+  galois::gDebug("^^^^^^^^ init band ^^^^^^^^");
+#endif
+  }
+
+#ifndef NDEBUG
+// initBag sanity check
+  galois::do_all(
+    galois::iterate(wl),
+    [&](auto pair) {
+      galois::gDebug(pair.first, " : ", pair.second);
+      GNode node = pair.second;
+      auto& curData = graph.getData(node, no_lockable_flag);
+      // if (curData.tag != BAND) {
+      //   GALOIS_DIE("Problem with initBag");
+      // }
+      if (curData.tag != BAND) {
+        galois::gDebug("non-BAND");
+      }
+    },
+    //galois::no_stats(),
+    galois::loopname("sanity_check_initBag")
+  );
+#endif // end of initBag sanity check;
+
+  SerialFastMarching(graph, wl);
+}
+
+template<typename Graph, typename WL>
+void parallel(Graph& graph, WL& boundary) {
+  WL initBag;
+
   initializeBag(graph, boundary, initBag);
 
 #ifndef NDEBUG
@@ -705,6 +1010,62 @@ int main(int argc, char** argv) noexcept {
 #endif // end of initBag sanity check;
 
   FastMarching(graph, initBag);
+}
+
+int main(int argc, char** argv) noexcept {
+  galois::SharedMemSys galois_system;
+  LonestarStart(argc, argv, name, desc, url);
+
+  Graph graph;
+
+  galois::gDebug(ALGO_NAMES[algo]);
+
+  if (nh) nx = ny = nz = nh;
+  NUM_CELLS = nh? nh * nh * nh : nx * ny * nz;
+  dx = (xb - xa) / CoordTy(nx + 1);
+  dy = (yb - ya) / CoordTy(ny + 1);
+  dz = (zb - za) / CoordTy(nz + 1);
+  galois::gDebug(nx, " - ", ny, " - ", nz);
+  galois::gDebug(dx, " - ", dy, " - ", dz);
+
+  auto [num_nodes, num_cells, num_outer_faces, xy_low, xy_high, yz_low, yz_high,
+        xz_low, xz_high] = generate_grid(graph, nx, ny, nz);
+
+  // _sanity_coord();
+
+  initCells(graph, num_cells);
+
+  // TODO boundary settings
+  WL boundary;
+  //AssignBoundary(graph, boundary);
+  AssignBoundary(boundary);
+  assert(!boundary.empty() && "Boundary not defined!");
+
+#ifndef NDEBUG
+  galois::gDebug("vvvvvvvv boundary vvvvvvvv");
+  for (GNode b : boundary) {
+    auto coords = getCoord(b);
+    galois::gDebug(b, " (", coords[0], " ", coords[1], " ", coords[2], ")");
+  }
+  galois::gDebug("^^^^^^^^ boundary ^^^^^^^^");
+#endif
+
+  initBoundary(graph, boundary);
+
+  galois::StatTimer Tmain;
+  Tmain.start();
+
+  switch (algo) {
+  case Serial:
+    serial(graph, boundary);
+    break;
+  case Parallel:
+    parallel(graph, boundary);
+    break;
+  default:
+    std::abort();
+  }
+
   Tmain.stop();
 
   SanityCheck(graph);
@@ -712,3 +1073,4 @@ int main(int argc, char** argv) noexcept {
 
   return 0;
 }
+
