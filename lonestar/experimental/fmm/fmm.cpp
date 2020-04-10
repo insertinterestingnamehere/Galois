@@ -41,6 +41,8 @@
 #include <galois/graphs/Graph.h>
 #include <galois/graphs/LCGraph.h>
 
+#include <galois/AtomicHelpers.h>
+
 // Vendored from an old version of LLVM for Lonestar app command line handling.
 #include "llvm/Support/CommandLine.h"
 
@@ -56,17 +58,17 @@ static char const* url = "";
 using CoordTy = double;
 using SlnTy = double;
 
-enum Algo { Serial = 0, Parallel };
+enum Algo { serial = 0, parallel };
 
 const char* const ALGO_NAMES[] = { "serial", "parallel" };
 
 static llvm::cl::opt<Algo>
     algo("algo", llvm::cl::desc("Choose an algorithm:"),
          llvm::cl::values(
-           clEnumVal(Serial, "Serial"),
-           clEnumVal(Parallel, "Parallel"),
+           clEnumVal(serial, "serial"),
+           clEnumVal(parallel, "parallel"),
            clEnumValEnd),
-         llvm::cl::init(Serial));
+         llvm::cl::init(parallel));
 static llvm::cl::opt<unsigned long long> nh{
     "nh", llvm::cl::desc("number of cells in ALL direction"),
     llvm::cl::init(0u)};
@@ -169,13 +171,20 @@ static_assert(std::is_trivial_v<std::atomic<std::size_t>> &&
 //            BAND_OLD, BAND_NEW, FAR };
 enum Tag { KNOWN, BAND, FAR };
 
-struct NodeData {
+struct NonAtomicNodeData {
   bool is_ghost;
   Tag tag;
   double speed;
   double solution;
 };
 
+struct NodeData {
+  bool is_ghost; // read only
+  std::atomic<Tag> tag;
+  double speed; // read only
+  std::atomic<double> solution;
+};
+auto constexpr atomic_order = std::memory_order_relaxed;
 // No fine-grained locks built into the graph.
 // Use atomics for ALL THE THINGS!
 using Graph = galois::graphs::LC_CSR_Graph<NodeData, void>
@@ -288,56 +297,7 @@ void AssignBoundary(WL& boundary) {
   boundary.push(getNodeID({0., 0., 0.}));
 }
 
-////////////////////////////////////
-
-/////////////////////////////////////
-
-
-// Some helper functions for atomic operations with doubles:
-// TODO: try switching these to a load/compute/load/compare/CAS
-// style loop and see if it speeds it up.
-
-// Atomically do += operation on a double.
-void atomic_relaxed_double_increment(std::atomic<double>& base,
-                                     double increment) noexcept {
-  auto current = base.load(std::memory_order_relaxed);
-  /*decltype(current) previous;
-  while (true) {
-    previous = current;
-    current = base.load(std::memory_order_relaxed);
-    if (previous == current) {
-      if (base.compare_exchange_weak(current, current + increment,
-                                     std::memory_order_relaxed,
-                                     std::memory_order_relaxed)) {
-        break;
-      }
-    }
-  }*/
-  while (!base.compare_exchange_weak(current, current + increment,
-                                     std::memory_order_relaxed,
-                                     std::memory_order_relaxed))
-    ;
-}
-
-// Atomically do base = max(base, newval)
-void atomic_relaxed_double_max(std::atomic<double>& base,
-                               double newval) noexcept {
-  auto current = base.load(std::memory_order_relaxed);
-  while (current != std::max(current, newval)) {
-    base.compare_exchange_weak(current, newval, std::memory_order_relaxed,
-                               std::memory_order_relaxed);
-  }
-}
-
-
 /////////////////////////////////////////////
-
-// The label for a piece of work in the for_each loop
-// that actually runs the sweeping computation.
-struct work_t {
-  std::size_t node_index;
-  std::size_t direction_index;
-};
 
 // Routine to initialize graph topology and face normals.
 auto generate_grid(Graph& built_graph, std::size_t nx, std::size_t ny,
@@ -487,99 +447,117 @@ void initBoundary(Graph& graph, WL& boundary) {
     galois::loopname("initializeBoundary"));
 }
 
-void initializeBag(Graph& graph, WL& boundary, WL& initBag) {
-  galois::do_all(
-    galois::iterate(boundary.begin(), boundary.end()),
-    [&](GNode node) noexcept {
-      for (auto e : graph.edges(node, no_lockable_flag)) {
-        GNode dst = graph.getEdgeDst(e);
-        if (dst < NUM_CELLS) {
-          auto& dstData = graph.getData(dst, no_lockable_flag);
-          if (dstData.solution == INF)
-            initBag.push(dst);
-        }
-      }
-    },
-    galois::loopname("initializeBag"));
-}
+////////////////////////////////////////////////////////////////////////////////
 
+////////////////////////////////////////////////////////////////////////////////
+// Solver
 
-// void updateNeighbors() {}
-
-auto checkDirection(Graph& graph, GNode node, double sln, Graph::edge_iterator dir) {
+auto checkDirection(Graph& graph, GNode node, double center_sln, Graph::edge_iterator dir) {
+#ifndef NDEBU
   if (dir >= graph.edge_end(node, no_lockable_flag)) {
-    galois::gDebug(node, (graph.getData(node, no_lockable_flag).is_ghost? " ghost":" non-ghost"), " ",
+    galois::gDebug(node, " ", (graph.getData(node, no_lockable_flag).is_ghost? "ghost":"non-ghost"), " ",
                      std::distance(graph.edge_begin(node, no_lockable_flag), graph.edge_end(node, no_lockable_flag)) );
     GALOIS_DIE("invalid direction");
   }
-  // GNode upwind = node;
+#endif
+  SlnTy sln = center_sln;
+  GNode upwind = node;
   GNode neighbor = graph.getEdgeDst(dir);
   auto& first_data = graph.getData(neighbor, no_lockable_flag);
-  if (first_data.solution < sln) {
+  galois::gDebug("Check neighbor ", neighbor, (int)first_data.tag);
+  // if (first_data.tag == KNOWN)
+    if (first_data.solution < sln) {
     sln = first_data.solution;
-    // upwind = neighbor;
+    upwind = neighbor;
   }
   std::advance(dir, 1); // opposite direction of the same dimension
   if (dir != graph.edge_end(node, no_lockable_flag)) {
     neighbor = graph.getEdgeDst(dir);
     auto& second_data = graph.getData(neighbor, no_lockable_flag);
-    if (second_data.solution < sln) {
-      // upwind = neighbor;
+    galois::gDebug("Check neighbor ", neighbor, (int)second_data.tag);
+    // if (second_data.tag == KNOWN)
+      if (second_data.solution < sln) {
       sln = second_data.solution;
+      upwind = neighbor;
     }
   }
-  // since it's uniform discretization (regular grids), delta is 1
-  // return std::make_pair(delta, sln)
-  return sln;
+  if (upwind == node)
+    return std::make_pair(0., 0.);
+  return std::make_pair(sln, dx);
 }
 
 double solveQuadratic(Graph& graph, GNode node, double sln, const double speed) {
   // TODO oarameterize dimension 3
-  std::array<double, 3> solutions = {0., 0., 0.};
+  std::array<std::pair<double, double>, 3> sln_delta {
+                                            std::make_pair(0., dx),
+                                            std::make_pair(0., dy),
+                                            std::make_pair(0., dz)
+                                          };
   int non_zero_counter = 0;
   auto dir = graph.edge_begin(node, no_lockable_flag);
-  for (double& s : solutions) {
+  for (auto& p : sln_delta) {
     if (dir == graph.edge_end(node, no_lockable_flag))
       break;
-    s = checkDirection(graph, node, sln, dir);
-    if (s != sln)
+    double& s = p.first;
+    double& d = p.second;
+    auto [si, di] = checkDirection(graph, node, sln, dir);
+    if (di) {
+      s = si;
       non_zero_counter++;
-    else
-      s = 0.;
+    }
+    else {
+      // s = 0.; // already there
+      d = 0.;
+    }
     std::advance(dir, 2);
   }
-  galois::gDebug("solveQuadratic: ", solutions[0], " ", solutions[1], " ", solutions[2]);
-  for (; non_zero_counter > 0; non_zero_counter--) {
-    auto max_sln_it = std::max_element(solutions.begin(), solutions.end());
+  galois::gDebug("SerialSolveQuadratic: ", sln_delta[0].second, " ", sln_delta[1].second, " ", sln_delta[2].second,
+    " #non_zero: ", non_zero_counter);
+  if (non_zero_counter == 0)
+    return INF;
+  while (non_zero_counter) {
+    auto max_s_d_it = std::max_element(sln_delta.begin(), sln_delta.end(),
+        [&](std::pair<double, double>& a, std::pair<double, double>& b) {
+          return a.first < b.first;
+        });
     double a(0.), b(0.), c(0.);
-    for (const double& s : solutions) {
-      double temp = 1. / (1. * 1.); // TODO delta
+    for (const auto& p : sln_delta) {
+      const double& s = p.first, d = p.second;
+      galois::gDebug(s, " ", d);
+      double temp = (d == 0.? 0. : (1. / (d * d)));
       a += temp;
       temp *= s;
       b += temp;
       temp *= s;
       c += temp;
+      galois::gDebug("tabs: ", temp, " ", a, " ", b, " ", c);
     }
     b *= -2.;
     c -= (1. / (speed * speed));
-    double d = b * b - (4. * a * c);
-    if (d >= 0) {
-      double new_sln = (-b + std::sqrt(d)) / (2. * a);
-      if (new_sln > *max_sln_it)
+    double del = b * b - (4. * a * c);
+    galois::gDebug(a, " ", b, " ", c, " del=", del);
+    if (del >= 0) {
+      double new_sln = (-b + std::sqrt(del)) / (2. * a);
+      galois::gDebug("new solution: ", new_sln);
+      if (new_sln > max_s_d_it->first)
         sln = std::min(sln, new_sln); // TODO atomic here?
     }
-    *max_sln_it = 0.;
+    max_s_d_it->first = 0.;
+    max_s_d_it->second = 0.;
+    non_zero_counter--;
   }
   return sln;
 }
 
 auto SerialCheckDirection(Graph& graph, GNode node, double center_sln, Graph::edge_iterator dir) {
-  SlnTy sln = 0;
+#ifndef NDEBU
   if (dir >= graph.edge_end(node, no_lockable_flag)) {
-    galois::gDebug(node, (graph.getData(node, no_lockable_flag).is_ghost? " ghost":" non-ghost"), " ",
+    galois::gDebug(node, " ", (graph.getData(node, no_lockable_flag).is_ghost? "ghost":"non-ghost"), " ",
                      std::distance(graph.edge_begin(node, no_lockable_flag), graph.edge_end(node, no_lockable_flag)) );
     GALOIS_DIE("invalid direction");
   }
+#endif
+  SlnTy sln = INF;
   GNode upwind = node;
   GNode neighbor = graph.getEdgeDst(dir);
   auto& first_data = graph.getData(neighbor, no_lockable_flag);
@@ -594,8 +572,10 @@ auto SerialCheckDirection(Graph& graph, GNode node, double center_sln, Graph::ed
     auto& second_data = graph.getData(neighbor, no_lockable_flag);
     // galois::gDebug("Check neighbor ", neighbor, (int)second_data.tag);
     if (second_data.tag == KNOWN) {
-      upwind = neighbor;
-      sln = second_data.solution;
+      if (second_data.solution < sln) {
+        sln = second_data.solution;
+        upwind = neighbor;
+      }
     }
   }
   if (upwind == node)
@@ -635,7 +615,7 @@ double SerialSolveQuadratic(Graph& graph, GNode node, double sln, const double s
     for (const auto& p : sln_delta) {
       const double& s = p.first, d = p.second;
       galois::gDebug(s, " ", d);
-      double temp = d == 0? 0. : 1. / (d * d); // TODO delta
+      double temp = (d == 0.? 0. : (1. / (d * d)));
       a += temp;
       temp *= s;
       b += temp;
@@ -659,8 +639,67 @@ double SerialSolveQuadratic(Graph& graph, GNode node, double sln, const double s
   return INF;
 }
 
-/////
-// serial
+////////////////////////////////////////////////////////////////////////////////
+
+////////////////////////////////////////////////////////////////////////////////
+// first iteration
+
+void initializeBagPULL(Graph& graph, WL& boundary, WL& initBag) {
+  galois::do_all(
+    galois::iterate(boundary.begin(), boundary.end()),
+    [&](GNode node) noexcept {
+      for (auto e : graph.edges(node, no_lockable_flag)) {
+        GNode dst = graph.getEdgeDst(e);
+        if (dst < NUM_CELLS) {
+          auto& dstData = graph.getData(dst, no_lockable_flag);
+          if (dstData.solution == INF)
+            initBag.push(dst);
+        }
+      }
+    },
+    galois::loopname("initializeBag"));
+}
+
+void initializeBag(Graph& graph, WL& boundary, WL& initBag) {
+  galois::do_all(
+    galois::iterate(boundary.begin(), boundary.end()),
+    [&](GNode node) noexcept {
+      for (auto e : graph.edges(node, no_lockable_flag)) {
+        GNode dst = graph.getEdgeDst(e);
+        if (dst < NUM_CELLS) {
+          auto& dstData = graph.getData(dst, no_lockable_flag);
+          assert(!dstData.is_ghost);
+          if (dstData.tag != KNOWN) {
+            assert(dstData.solution == INF);
+            assert(dstData.tag == FAR);
+            SlnTy old_sln = dstData.solution;
+            double sln_temp = solveQuadratic(graph, dst, old_sln, dstData.speed);
+            if (sln_temp < old_sln) {
+              galois::gDebug("Hi! I'm ", dst, " I got ", sln_temp);
+              dstData.solution = sln_temp;
+              if (dstData.tag == BAND) {
+#ifndef NDEBUG
+                bool in_wl = false;
+                for (GNode i : initBag) {
+                  if (i == node) {
+                    in_wl = true;
+                    break;
+                  }
+                }
+                assert(in_wl);
+#endif
+              } else {
+                dstData.tag = BAND;
+                initBag.push(dst);
+              }
+            }
+          }
+        }
+      }
+    },
+    galois::loopname("initializeBag"));
+}
+
 template <typename Graph, typename BL, typename WL>
 void SerialInitializeBag(Graph& graph, BL& boundary, WL& wl) {
   for (GNode node : boundary) {
@@ -668,12 +707,13 @@ void SerialInitializeBag(Graph& graph, BL& boundary, WL& wl) {
       GNode dst = graph.getEdgeDst(e);
       if (dst < NUM_CELLS) {
         auto& dstData = graph.getData(dst, no_lockable_flag);
-        if (!dstData.is_ghost && dstData.tag != KNOWN) {
+        assert(!dstData.is_ghost);
+        if (dstData.tag != KNOWN) {
           assert(dstData.solution == INF && dstData.tag == FAR);
           SlnTy old_sln = dstData.solution;
           double sln_temp = SerialSolveQuadratic(graph, dst, old_sln, dstData.speed);
           if (sln_temp < old_sln) {
-            galois::gDebug("Hi! I'm ", dst, " ", sln_temp);
+            galois::gDebug("Hi! I'm ", dst, " I got ", sln_temp);
             dstData.solution = sln_temp;
             dstData.tag = BAND;
             auto iter = wl.lower_bound(old_sln);
@@ -699,9 +739,15 @@ void SerialInitializeBag(Graph& graph, BL& boundary, WL& wl) {
   }
 }
 
+////////////////////////////////////////////////////////////////////////////////
+
+////////////////////////////////////////////////////////////////////////////////
+// FMM
+
 template <typename Graph, typename WL>
 void SerialFastMarching(Graph& graph, WL& wl) {
   double max_error = 0;
+  std::size_t num_iterations = 0;
   while (!wl.empty()) {
     auto beg = wl.begin();
     GNode node = beg->second;
@@ -751,13 +797,17 @@ void SerialFastMarching(Graph& graph, WL& wl) {
       GNode dst = graph.getEdgeDst(e);
       if (dst < NUM_CELLS) {
         auto& dstData = graph.getData(dst, no_lockable_flag);
-        if (!dstData.is_ghost && dstData.tag != KNOWN) {
+        assert(!dstData.is_ghost);
+        if (dstData.tag != KNOWN) {
+#ifndef NDEBUG
           {
             auto [x, y, z] = getCoord(dst);
             galois::gDebug("Update ", dst, " (", x, " ", y, " ", z, " )");
           }
+#endif
           // assert(dstData.solution == INF && dstData.tag == FAR);
           SlnTy old_sln = dstData.solution;
+          assert(old_sln > curData.solution);
           double sln_temp = SerialSolveQuadratic(graph, dst, old_sln, dstData.speed);
           if (sln_temp < old_sln) {
             dstData.solution = sln_temp;
@@ -803,11 +853,100 @@ void SerialFastMarching(Graph& graph, WL& wl) {
         }
       }
     }
+    num_iterations++;
   }
   galois::gDebug("max error: ", max_error);
+  galois::gPrint("#iterarions: ", num_iterations, "\n");
 }
 
 void FastMarching(Graph& graph, WL& initBag) {
+  galois::GReduceMax<double> max_error;
+  auto Indexer = [&](const double& sln) {
+    unsigned t = std::round(sln * 2);
+    return t;
+  };
+  using PSchunk = galois::worklists::PerSocketChunkLIFO<32>; // chunk size 16
+  using OBIM    = galois::worklists::OrderedByIntegerMetric<decltype(Indexer), PSchunk>;
+
+// galois::runtime::profileVtune(
+// [&](){
+  galois::for_each(
+    galois::iterate(initBag.begin(), initBag.end()),
+    [&](GNode node, auto& ctx) {
+      // char n; std::cin>>n;
+      assert(node < NUM_CELLS && "Ghost Point!");
+      auto& curData = graph.getData(node, galois::MethodFlag::UNPROTECTED);
+      // galois::gPrint("Hi! I'm ", node, "\n");
+#ifndef NDEBUG
+      {
+        auto [x, y, z] = getCoord(node);
+        galois::gDebug("Hi! I'm ", node, " (", x, " ", y, " ", z, " ) with ", curData.solution);
+      }
+      if (curData.tag == KNOWN) {
+        galois::gDebug(node, " in bag as KNWON");
+        assert(curData.solution != INF);
+      }
+
+      if (curData.is_ghost) {
+        // should not get here, asserted before
+        std::abort();
+      }
+
+      // {
+      //   auto [x, y, z] = getCoord(node);
+      //   galois::atomicMin(max_error, curData.solution - std::sqrt(x * x + y * y + z * z));
+      //   if (curData.solution - std::sqrt(x * x + y * y + z * z) > 0.2) {
+      //     galois::gDebug(curData.solution - std::sqrt(x * x + y * y + z * z),
+      //       " - wrong distance, should be ", std::sqrt(x * x + y * y + z * z));
+      //     assert(false);
+      //   }
+      // }
+#endif
+      assert(curData.solution != INF);
+      assert(curData.tag == BAND);
+      curData.tag = KNOWN;
+
+      // UpdateNeighbors
+      for (auto e : graph.edges(node, no_lockable_flag)) {
+        GNode dst = graph.getEdgeDst(e);
+        if (dst < NUM_CELLS) {
+          auto& dstData = graph.getData(dst, no_lockable_flag);
+          assert(!dstData.is_ghost);
+          // if (dstData.tag != KNOWN) {
+          if (dstData.solution > curData.solution) {
+#ifndef NDEBUG
+            {
+              auto [x, y, z] = getCoord(dst);
+              galois::gDebug("Update ", dst, " (", x, " ", y, " ", z, " )");
+            }
+#endif
+            // assert(dstData.solution == INF && dstData.tag == FAR);
+          galois::gDebug(dstData.tag, dstData.solution);
+            SlnTy old_sln = dstData.solution;
+            double sln_temp = solveQuadratic(graph, dst, old_sln, dstData.speed);
+            if (sln_temp < galois::atomicMin(dstData.solution, sln_temp)) {
+              if (dstData.tag != BAND) {
+                dstData.tag = BAND;
+                ctx.push(dst);
+              }
+            } else {
+              galois::gDebug(dst, " solution not updated: ", sln_temp,
+                " (currently ", dstData.solution, ")");
+            }
+          }
+        }
+      }
+    },
+    galois::no_conflicts(),
+    // galois::no_stats(),
+    galois::wl<OBIM>(Indexer),
+    galois::loopname("FMM")
+  );
+// },
+// "FMM_VTune");
+}
+
+void FastMarchingPULL(Graph& graph, WL& initBag) {
   auto Indexer = [&](const double& sln) {
     unsigned t = std::round(sln * 128);
     return t;
@@ -815,17 +954,40 @@ void FastMarching(Graph& graph, WL& initBag) {
   using PSchunk = galois::worklists::PerSocketChunkLIFO<32>; // chunk size 16
   using OBIM    = galois::worklists::OrderedByIntegerMetric<decltype(Indexer), PSchunk>;
 
+  std::atomic<double> max_error = 0;
 galois::runtime::profileVtune(
 [&](){
   galois::for_each(
     galois::iterate(initBag.begin(), initBag.end()),
     [&](GNode node, auto& ctx) {
+      // char n; std::cin>>n;
       assert(node < NUM_CELLS && "Ghost Point!");
       auto& curData = graph.getData(node, galois::MethodFlag::UNPROTECTED);
-      if (curData.is_ghost) {
-        // should not get here, asserted before
-        std::abort();
-      }
+#ifndef NDEBUG
+    {
+      auto [x, y, z] = getCoord(node);
+      galois::gDebug("Hi! I'm ", node, " (", x, " ", y, " ", z, " ) with ", curData.solution);
+    }
+    if (curData.tag == KNOWN) {
+      galois::gDebug(node, " in bag as KNWON");
+      assert(curData.solution != INF);
+    }
+
+    if (curData.is_ghost) {
+      // should not get here, asserted before
+      std::abort();
+    }
+
+    //{
+    //  auto [x, y, z] = getCoord(node);
+    //  galois::atomicMin(max_error, curData.solution - std::sqrt(x * x + y * y + z * z));
+    //  if (curData.solution - std::sqrt(x * x + y * y + z * z) > 0.2) {
+    //    galois::gDebug(curData.solution - std::sqrt(x * x + y * y + z * z),
+    //      " - wrong distance, should be ", std::sqrt(x * x + y * y + z * z));
+    //    assert(false);
+    //  }
+    //}
+#endif
       // assert(curData.tag == BAND);
       // if (curData.tag != KNOWN) {
         double sln_temp = solveQuadratic(graph, node, curData.solution, curData.speed);
@@ -841,7 +1003,6 @@ galois::runtime::profileVtune(
                   ctx.push(dst);
               }
             }
-            curData.tag = KNOWN;
           // }
           // else {
           //   if (curData.tag != BAND) {
@@ -852,10 +1013,15 @@ galois::runtime::profileVtune(
           // }
         }
         // not updated
-        // else {
-        //   assert(curData.tag == BAND);
-        //   ctx.push(node);
-        // }
+        else {
+          if (sln_temp >= curData.solution)
+            galois::gDebug("solution not updated: ", sln_temp,
+              " (currently ", curData.solution, ")");
+          if (curData.solution != INF)
+            curData.tag = KNOWN;
+          else
+            ctx.push(node);
+        }
       // }
     },
     galois::no_conflicts(),
@@ -866,6 +1032,11 @@ galois::runtime::profileVtune(
 },
 "FMM_VTune");
 }
+
+////////////////////////////////////////////////////////////////////////////////
+
+////////////////////////////////////////////////////////////////////////////////
+// Sanity check
 
 void SanityCheck(Graph& graph) {
   galois::GReduceMax<double> max_error;
@@ -878,7 +1049,7 @@ void SanityCheck(Graph& graph) {
       auto& curData = graph.getData(node, galois::MethodFlag::UNPROTECTED);
       if (curData.solution == INF) {
         galois::gPrint("Untouched cell: ", node, "\n");
-        return;
+        assert(curData.solution != INF);
       }
 
       SlnTy val = 0.;
@@ -889,12 +1060,12 @@ void SanityCheck(Graph& graph) {
           break;
         GNode neighbor = graph.getEdgeDst(dir);
         auto& first_data = graph.getData(neighbor, no_lockable_flag);
-        assert(first_data.is_ghost || first_data.tag == KNOWN);
+        // assert(first_data.is_ghost || first_data.tag == KNOWN);
         std::advance(dir, 1); // opposite direction of the same dimension
         assert(dir != graph.edge_end(node, no_lockable_flag));
         neighbor = graph.getEdgeDst(dir);
         auto& second_data = graph.getData(neighbor, no_lockable_flag);
-        assert(second_data.is_ghost || second_data.tag == KNOWN);
+        // assert(second_data.is_ghost || second_data.tag == KNOWN);
         SlnTy
           s1 = (curData.solution - first_data.solution) / d,
           s2 = (curData.solution - second_data.solution) / d;
@@ -908,7 +1079,7 @@ void SanityCheck(Graph& graph) {
         auto [x, y, z] = getCoord(node);
         galois::gPrint("Upwind structure violated at cell: ", node,
                         " (", x, " ", y, " ", z, ")",
-                        " with ", curData.solution, " of error ", error,
+                        " with ", curData.solution.load(std::memory_order_relaxed), " of error ", error,
                         " (", std::sqrt(x * x + y * y + z * z), ")\n");
         return;
       }
@@ -916,7 +1087,7 @@ void SanityCheck(Graph& graph) {
     galois::no_stats(),
     galois::loopname("sanityCheck"));
 
-  galois::gPrint("max err: ", max_error.reduce());
+  galois::gPrint("max err: ", max_error.reduce(), "\n");
 }
 
 void SanityCheck2(Graph& graph) {
@@ -933,13 +1104,18 @@ void SanityCheck2(Graph& graph) {
 
 void _sanity_coord() {
   for (GNode i = 0; i < NUM_CELLS; i++) {
-    auto c = getCoord(i);
-    galois::gDebug(c[0], " ", c[1], " ", c[2], " ", getNodeID(c));
+    auto [x, y, z] = getCoord(i);
+    galois::gDebug(x, " ", y, " ", z, " ", getNodeID({x, y, z}));
   }
 }
 
+////////////////////////////////////////////////////////////////////////////////
+
+////////////////////////////////////////////////////////////////////////////////
+// Algo
+
 template<typename Graph, typename WL>
-void serial(Graph& graph, WL& boundary) {
+void serialAlgo(Graph& graph, WL& boundary) {
   //  using HeapElemTy = std::pair<GNode, double>
   //  auto heapCmp = [&](HeapElemTy a, HeapElemTy b) { return a.second < b.second; }
   //  using HeapTy = galois::MinHeap<std::pair<GNode, double>>
@@ -986,10 +1162,25 @@ void serial(Graph& graph, WL& boundary) {
 }
 
 template<typename Graph, typename WL>
-void parallel(Graph& graph, WL& boundary) {
+void parallelAlgo(Graph& graph, WL& boundary) {
   WL initBag;
 
   initializeBag(graph, boundary, initBag);
+
+  if (initBag.empty()) {
+    galois::gDebug("No cell to be processed!");
+    std::abort();
+  } else {
+#ifndef NDEBUG
+  galois::gDebug("vvvvvvvv init band vvvvvvvv");
+  for (auto i : initBag) {
+    auto coords = getCoord(i);
+    galois::gDebug(i, " (", coords[0], " ", coords[1], " ", coords[2], ") with ",
+      graph.getData(i, no_lockable_flag).solution);
+  }
+  galois::gDebug("^^^^^^^^ init band ^^^^^^^^");
+#endif
+  }
 
 #ifndef NDEBUG
 // initBag sanity check
@@ -1000,8 +1191,8 @@ void parallel(Graph& graph, WL& boundary) {
       // if (curData.tag != BAND) {
       //   GALOIS_DIE("Problem with initBag");
       // }
-      if (curData.solution != INF) {
-        galois::gDebug("non-FAR");
+      if (curData.tag != BAND) {
+        galois::gDebug("non-BAND");
       }
     },
     galois::no_stats(),
@@ -1011,6 +1202,8 @@ void parallel(Graph& graph, WL& boundary) {
 
   FastMarching(graph, initBag);
 }
+
+////////////////////////////////////////////////////////////////////////////////
 
 int main(int argc, char** argv) noexcept {
   galois::SharedMemSys galois_system;
@@ -1056,11 +1249,11 @@ int main(int argc, char** argv) noexcept {
   Tmain.start();
 
   switch (algo) {
-  case Serial:
-    serial(graph, boundary);
+  case serial:
+    serialAlgo(graph, boundary);
     break;
-  case Parallel:
-    parallel(graph, boundary);
+  case parallel:
+    parallelAlgo(graph, boundary);
     break;
   default:
     std::abort();
