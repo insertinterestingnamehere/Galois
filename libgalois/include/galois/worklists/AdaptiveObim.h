@@ -30,30 +30,29 @@
 #define ERR_MSG if(0) std::cout
 #endif
 
-#include "Galois/config.h"
-#include "Galois/FlatMap.h"
-#include "Galois/Timer.h"
-#include "Galois/Runtime/PerThreadStorage.h"
-#include "Galois/WorkList/Fifo.h"
-#include "Galois/WorkList/WorkListHelpers.h"
-
-#include "Galois/Statistic.h"
-
-#include GALOIS_CXX11_STD_HEADER(type_traits)
-#include <limits>
-
 #include <atomic>
-
 #include <iostream>
+#include <limits>
+#include <type_traits>
 
-namespace Galois {
-namespace WorkList {
+#include "galois/config.h"
+#include "galois/FlatMap.h"
+#include "galois/Timer.h"
+#include "galois/runtime/Statitsics.h"
+#include "galois/substrate/PerThreadStorage.h"
+#include "galois/worklists/Fifo.h"
+#include "galois/worklists/Chunk.h"
+#include "galois/worklists/WorkListHelpers.h"
+
+namespace galois {
+namespace worklists {
 
 /**
  * Approximate priority scheduling. Indexer is a default-constructable class
- * whose instances conform to <code>R r = indexer(item)</code> where R is
- * some type with a total order defined by <code>operator&lt;</code> and <code>operator==</code>
- * and item is an element from the Galois set iterator.
+ * whose instances conform to <code>R r = indexer(item)</code> where R is some
+ * type with a total order defined by <code>operator&lt;</code> and
+ * <code>operator==</code> and item is an element from the Galois set
+ * iterator.
  *
  * An example:
  * \code
@@ -72,6 +71,11 @@ namespace WorkList {
  * @tparam BlockPeriod Check for higher priority work every 2^BlockPeriod
  *                     iterations
  * @tparam BSP Use back-scan prevention
+ * @tparam uniformBSP Use uniform back-scan prevention
+ * @tparam T Work item type
+ * @tparam Index Indexer return type
+ * @tparam Concurrent Whether or not to allow concurrent execution
+ *
  */
 template<class Indexer = DummyIndexer<int>, typename Container = FIFO<>,
   int BlockPeriod=0,
