@@ -58,20 +58,27 @@ static char const* url = "";
 using CoordTy = double;
 using SlnTy = double;
 
-enum Algo { serial = 0, parallel, partition, bipartiteSync };
+static llvm::cl::opt<std::string> filename(llvm::cl::Positional,
+                                      llvm::cl::desc("<input file>"), llvm::cl::Required);
+
+enum Algo { serial = 0, parallel, serial2d, partition, bipartiteSync };
 enum Source { scatter = 0, analytical };
 
-const char* const ALGO_NAMES[] = { "serial", "parallel", "partition", "bipartiteSync" };
+const char* const ALGO_NAMES[] = { "serial", "parallel",  "serial2d", "partition", "bipartiteSync" };
 
 static llvm::cl::opt<Algo>
     algo("algo", llvm::cl::desc("Choose an algorithm:"),
          llvm::cl::values(
            clEnumVal(serial, "serial"),
            clEnumVal(parallel, "parallel"),
+           clEnumVal(serial2d, "serial2d"),
            clEnumVal(partition, "partition"),
            clEnumVal(bipartiteSync, "bipartiteSync"),
            clEnumValEnd),
          llvm::cl::init(parallel));
+static llvm::cl::opt<int> dimension{
+    "dimension", llvm::cl::desc("number of dimensions worked on"),
+    llvm::cl::init(2)};
 static llvm::cl::opt<Source>
     source_type("source", llvm::cl::desc("Choose an sourceType:"),
          llvm::cl::values(
@@ -198,6 +205,11 @@ struct NodeData {
   std::atomic<double> solution;
 };
 auto constexpr atomic_order = std::memory_order_relaxed;
+
+#include "Mesh.h"
+#include "Element.h"
+#include "Verifier.h"
+
 // No fine-grained locks built into the graph.
 // Use atomics for ALL THE THINGS!
 
@@ -318,61 +330,73 @@ GNode getNodeID(const std::array<CoordTy, 3>& coords) {
 // TODO make it external and customizable
 // TODO multi-dimension configuration
 template <typename CoordTy>
-static double SpeedFunction(std::array<CoordTy, 3> coords) {
-  const CoordTy& x = coords[0], y = coords[1], z = coords[2];
+static double SpeedFunction(std::array<CoordTy, 2> coords) {
+  auto [x, y] = coords;
 
   return 1.;
   // return 1. + .50 * std::sin(20. * PI * x) * std::sin(20. * PI * y) * std::sin(20. * PI * z);
   // return 1. - .99 * std::sin(2. * PI * x) * std::sin(2. * PI * y) * std::sin(2. * PI * z);
 }
 
-static double BoundaryCondition(std::array<CoordTy, 3> coords = {}) {
+static double BoundaryCondition(std::array<CoordTy, 2> coords = {}) {
   return 0.;
 }
 
-static bool NonNegativeRegion(const std::array<CoordTy, 3>& coords) {
-  const CoordTy& x = coords[0], y = coords[1], z = coords[2];
-
-  // Example 1: a spherical interface of radius 0.25 centered at the origin
-  // return x * x + y * y + z * z >= .25 * .25;
-
-  // Example 2: a plane past through the origin
-  return 100. * x + y + 2. * z >= 0.;
-}
+// TODO analytical boundary
+// static bool NonNegativeRegion(const std::array<CoordTy, 3>& coords) {
+//   const CoordTy& x = coords[0], y = coords[1], z = coords[2];
+// 
+//   // Example 1: a spherical interface of radius 0.25 centered at the origin
+//   // return x * x + y * y + z * z >= .25 * .25;
+// 
+//   // Example 2: a plane past through the origin
+//   return 100. * x + y + 2. * z >= 0.;
+// }
+// 
+// template <typename Graph, typename BL,
+//           typename GNode = typename Graph::GraphNode,
+//           typename T = typename BL::value_type>
+// void AssignBoundary(Graph& graph, BL& boundary) {
+//   galois::do_all(
+//     galois::iterate(0ul, NUM_CELLS),
+//     [&](T node) noexcept {
+//       if (node > NUM_CELLS) return;
+// 
+//       if (NonNegativeRegion(getCoord(node))) {
+//         for (auto e : graph.edges(node, no_lockable_flag)) {
+//           GNode dst = graph.getEdgeDst(e);
+//           if (!NonNegativeRegion(getCoord(dst))) {
+// // #ifndef NDEBUG
+// //             auto c = getCoord(node);
+// //             galois::gDebug(node, " (", c[0], " ", c[1], " ", c[2], ")");
+// // #endif
+//             boundary.push(node);
+//             break;
+//           }
+//         }
+//       }
+//     },
+//     galois::loopname("assignBoundary"));
+// }
 
 template <typename Graph, typename BL,
           typename GNode = typename Graph::GraphNode,
           typename T = typename BL::value_type>
 void AssignBoundary(Graph& graph, BL& boundary) {
-  galois::do_all(
-    galois::iterate(0ul, NUM_CELLS),
-    [&](T node) noexcept {
-      if (node > NUM_CELLS) return;
+  Tuple n = {0., 0.};
 
-      if (NonNegativeRegion(getCoord(node))) {
-        for (auto e : graph.edges(node, no_lockable_flag)) {
-          GNode dst = graph.getEdgeDst(e);
-          if (!NonNegativeRegion(getCoord(dst))) {
-// #ifndef NDEBUG
-//             auto c = getCoord(node);
-//             galois::gDebug(node, " (", c[0], " ", c[1], " ", c[2], ")");
-// #endif
-            boundary.push(node);
-            break;
-          }
-        }
+  galois::do_all(
+    galois::iterate(graph.begin(), graph.end()),
+    [&](GNode nh) noexcept {
+      auto& data = graph.getData(nh, no_lockable_flag);
+      if (data.dim() == 2) return;
+
+      if (data.inTriangle(n)) {
+        boundary.push(nh);
       }
     },
     galois::loopname("assignBoundary"));
 }
-
-// template <typename WL>
-// void AssignBoundary(WL& boundary) {
-//   for (GNode i = 0; i < nx * ny; i++) {
-//     boundary.push(i);
-//   }
-// }
-
 template <typename GNode, typename BL>
 void AssignBoundary(BL& boundary) {
 // #ifndef NDEBUG
@@ -509,31 +533,42 @@ auto generate_grid(Graph& built_graph, std::size_t nx, std::size_t ny,
 
 ///////////////////////////////////////////////////////////////////////////////
 
-template <typename Graph,
+template <typename Graph, typename PDM,
           typename GNode = typename Graph::GraphNode>
-void initCells(Graph& graph, size_t num_cells) {
+void initCells(Graph& graph, PDM& getPointData) {
   galois::do_all(
     galois::iterate(graph.begin(), graph.end()),
-    [&](GNode node) noexcept {
-      auto& curData = graph.getData(node, galois::MethodFlag::UNPROTECTED);
-      curData.is_ghost = (node >= num_cells);
-      curData.tag = FAR;
-      curData.speed = SpeedFunction(getCoord(node));
-      curData.solution = INF; // TODO ghost init?
+    [&](GNode nh) noexcept {
+      auto& dTriangle = graph.getData(nh, galois::MethodFlag::UNPROTECTED);
+      const auto& ids = dTriangle.getIds();
+      for (int i = 0; i < dTriangle.dim(); ++i) {
+        auto& dPoint = getPointData(ids[i], no_lockable_flag);
+        // dPoint.is_ghost = (node >= num_cells);
+        dPoint.tag = FAR;
+        auto& p = dTriangle.getPoint(i);
+        dPoint.speed = SpeedFunction(std::array{p[0], p[1]});
+        dPoint.solution = INF; // TODO ghost init?
+      }
+
     },
     galois::no_stats(),
     galois::loopname("initializeCells"));
 }
 
-template <typename Graph, typename BL,
+template <typename Graph, typename BL, typename PDM,
           typename T = typename BL::value_type>
-void initBoundary(Graph& graph, BL& boundary) {
+void initBoundary(Graph& graph, BL& boundary, PDM& getPointData) {
   galois::do_all(
     galois::iterate(boundary.begin(), boundary.end()),
-    [&](const T& node) noexcept {
-      auto& curData = graph.getData(node, galois::MethodFlag::UNPROTECTED);
-      curData.tag = KNOWN;
-      curData.solution = BoundaryCondition(getCoord(node));
+    [&](const T& nh) noexcept {
+      auto& dTriangle = graph.getData(nh, galois::MethodFlag::UNPROTECTED);
+      const auto& ids = dTriangle.getIds();
+      for (int i = 0; i < dTriangle.dim(); ++i) {
+        auto& dPoint = getPointData(ids[i], no_lockable_flag);
+        dPoint.tag = KNOWN;
+        auto& p = dTriangle.getPoint(i);
+        dPoint.solution = BoundaryCondition(std::array{p[0], p[1]});
+      } 
     },
     galois::no_stats(),
     galois::loopname("initializeBoundary"));
@@ -652,64 +687,26 @@ double solveQuadratic(Graph& graph, GNode node, double sln, const double speed) 
   return sln;
 }
 
-template <typename Graph,
-          typename GNode = typename Graph::GraphNode>
-double SerialSolveQuadratic(Graph& graph, GNode node, double sln, const double speed) {
-  // TODO oarameterize dimension 3
-  std::array<std::pair<double, double>, 3> sln_delta {
-                                            std::make_pair(0., dx),
-                                            std::make_pair(0., dy),
-                                            std::make_pair(0., dz)
-                                          };
-  int non_zero_counter = 0;
-  auto dir = graph.edge_begin(node, no_lockable_flag);
-  for (auto& p : sln_delta) {
-    if (dir == graph.edge_end(node, no_lockable_flag))
-      break;
-    double& s = p.first;
-    double& d = p.second;
-    auto [si, di] = checkDirection(graph, node, sln, dir);
-    if (di) {
-      s = si;
-      non_zero_counter++;
-    }
-    else {
-      // s = 0.; // already there
-      d = 0.;
-    }
-    std::advance(dir, 2);
-  }
-  if (non_zero_counter == 0)
-    return INF;
-  // galois::gDebug("SerialSolveQuadratic: ", sln_delta[0].second, " ", sln_delta[1].second, " ", sln_delta[2].second);
-  // for (; non_zero_counter > 0; non_zero_counter--) {
-    // auto max_sln_it = std::max_element(solutions.begin(), solutions.end());
-    double a(0.), b(0.), c(0.);
-    for (const auto& p : sln_delta) {
-      const double& s = p.first, d = p.second;
-      galois::gDebug(s, " ", d);
-      double temp = (d == 0.? 0. : (1. / (d * d)));
-      a += temp;
-      temp *= s;
-      b += temp;
-      temp *= s;
-      c += temp;
-      // galois::gDebug(temp, " ", a, " ", b, " ", c);
-    }
-    b *= -2.;
-    c -= (1. / (speed * speed));
-    double del = b * b - (4. * a * c);
-    galois::gDebug(a, " ", b, " ", c, " del=", del);
-    if (del >= 0) {
-      double new_sln = (-b + std::sqrt(del)) / (2. * a);
-      galois::gDebug("new solution: ", new_sln);
-      // if (new_sln > *max_sln_it)
-      //  sln = std::min(sln, new_sln); // TODO atomic here?
-      return new_sln;
-    }
-    // *max_sln_it = 0.;
-  // }
-  return INF;
+template <typename TriangleData>
+double SerialSolveQuadratic(TriangleData& td, int iC, const double speedC, double tA, double tB) {
+  const Tuple& C = td.getPoint(iC);
+  const Tuple& A = td.getPoint((iC+1) % 3);
+  const Tuple& B = td.getPoint((iC+2) % 3);
+
+  double
+    c = A.distance(B),
+    a = B.distance(C),
+    b = A.distance(C);
+
+  Tuple AB = B - A;
+  Tuple AC = C - A;
+  Tuple CB = B - C;
+  double
+    cosABC = (AB * CB) / (c * a),
+    cosBAC = (AB * AC) / (c * b),
+    rho = a * (1. - cosABC * cosABC);
+
+  return (rho * std::sqrt(speedC * speedC * c * c - (tA - tB) * (tA - tB)) + a * tA * cosABC + b * tB * cosBAC) / c;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -718,44 +715,58 @@ double SerialSolveQuadratic(Graph& graph, GNode node, double sln, const double s
 // first iteration
 
 template <bool CONCURRENT,
-          typename Graph, typename BL, typename WL,
+          typename Graph, typename BL, typename WL, typename PDM,
           typename GNode = typename Graph::GraphNode,
           typename BT = typename BL::value_type,
           typename WT = typename WL::value_type>
-void FirstIteration(Graph& graph, BL& boundary, WL& init_wl) {
+void FirstIteration(Graph& graph, BL& boundary, WL& init_wl, PDM& getPointData) {
   using Loop = typename
     std::conditional<CONCURRENT, galois::DoAll, galois::StdForEach>::type;
   Loop loop;
 
   loop(
     galois::iterate(boundary.begin(), boundary.end()),
-    [&](BT node) noexcept {
-      for (auto e : graph.edges(node, no_lockable_flag)) {
-        GNode dst = graph.getEdgeDst(e);
-        if (dst < NUM_CELLS) {
-          auto& dstData = graph.getData(dst, no_lockable_flag);
-          assert(!dstData.is_ghost);
-          if (dstData.tag != KNOWN) {
-            assert(dstData.solution.load(atomic_order) == INF || dstData.tag.load(atomic_order) != FAR);
-            SlnTy old_sln = dstData.solution.load(atomic_order);
+    [&](BT nh) noexcept {
+      for (auto e : graph.edges(nh, no_lockable_flag)) {
+        GNode dsth = graph.getEdgeDst(e);
+        auto& dstData = graph.getData(dsth, no_lockable_flag);
+        if (dstData.dim() == 3) {
+          const auto& ids = dstData.getIds();
+          int unknown = 3;
+          { // TODO make it something like if (dstData.tag != KNOWN)
+            for (int i = 0; i < dstData.dim(); ++i) {
+              auto& dPoint = getPointData(ids[i], no_lockable_flag);
+              if (dPoint.tag != KNOWN) {
+                // assert(dstData.solution.load(atomic_order) == INF || dstData.tag.load(atomic_order) != FAR);
+                assert(unknown == 3);
+                unknown = i;
+              }  
+            }
+          }
+          if (unknown != 3) {
+            auto& farPD = getPointData(ids[unknown], no_lockable_flag);
+            double tA = getPointData(ids[(unknown+1)%3], no_lockable_flag).solution.load(atomic_order);
+            double tB = getPointData(ids[(unknown+1)%3], no_lockable_flag).solution.load(atomic_order);
+            SlnTy old_sln = farPD.solution.load(atomic_order); // TODO remove
             SlnTy sln_temp = CONCURRENT? 
-              solveQuadratic(graph, dst, old_sln, dstData.speed) :
-              SerialSolveQuadratic(graph, dst, old_sln, dstData.speed);
-            if (sln_temp < galois::atomicMin(dstData.solution, sln_temp)) {
-              galois::gDebug("Hi! I'm ", dst, " I got ", sln_temp);
-              if (auto old_tag = dstData.tag.load(atomic_order); old_tag != BAND) {
-                while (!dstData.tag.compare_exchange_weak(
+              // solveQuadratic(graph, dsth, old_sln, farPD.speed) :
+              SerialSolveQuadratic(dstData, unknown, farPD.speed, tA, tB) :
+              SerialSolveQuadratic(dstData, unknown, farPD.speed, tA, tB);
+            if (sln_temp < galois::atomicMin(farPD.solution, sln_temp)) {
+              galois::gDebug("Hi! I'm ", dsth, " I got ", sln_temp);
+              if (auto old_tag = farPD.tag.load(atomic_order); old_tag != BAND) {
+                while (!farPD.tag.compare_exchange_weak(
                                      old_tag, BAND, std::memory_order_relaxed));
                 if constexpr (CONCURRENT)
-                  init_wl.push(WT{sln_temp, dst});
+                  init_wl.push(WT{sln_temp, dsth});
                 else
-                  init_wl.push(WT{sln_temp, dst}, old_sln);
+                  init_wl.push(WT{sln_temp, dsth}, old_sln);
 #ifndef NDEBUG
               } else {
                 if constexpr (CONCURRENT) {
                   bool in_wl = false;
                   for (auto [_, i] : init_wl) {
-                    if (i == node) {
+                    if (i == nh) {
                       in_wl = true;
                       break;
                     }
@@ -836,103 +847,126 @@ void while_wrapper(const RangeFunc& rangeMaker, FunctionTy &&fn,
 // FMM
 
 template <bool CONCURRENT,
-          typename Graph, typename WL,
+          typename Graph, typename WL, typename PDM,
           typename GNode = typename Graph::GraphNode,
           typename T = typename WL::value_type>
-void FastMarching(Graph& graph, WL& wl) {
+void FastMarching(Graph& graph, WL& wl, PDM& getPointData) {
   double max_error = 0;
   std::size_t num_iterations = 0;
 
 auto PushOp = [&]<typename ItemTy, typename UC>
   (const ItemTy& item, UC& wl) {
+    galois::gDebug("new item");
     auto [_old_sln, node] = item;
-    assert(node < NUM_CELLS && "Ghost Point!");
     auto& curData = graph.getData(node, galois::MethodFlag::UNPROTECTED);
+    assert(curData.dim() == 3);
+    { // TODO make it a function
+      const auto& ids = curData.getIds();
+        galois::gDebug("node ", node, " ", ids[0], " ", ids[1], " ", ids[2]);
+      for (int i = 0; i < curData.dim(); ++i) {
+        auto& dPoint = getPointData(ids[i], no_lockable_flag);
+        if (dPoint.tag != KNOWN) {
+          // assert(dstData.solution.load(atomic_order) == INF || dstData.tag.load(atomic_order) != FAR);
 #ifndef NDEBUG
-    {
-      assert(!curData.is_ghost && "impossible, asserted before");
-      auto [x, y, z] = getCoord(node);
-      galois::gDebug("Hi! I'm ", node, " (", x, " ", y, " ", z, " ) with ", curData.solution);
-      assert(curData.solution != INF);
-    }
-if constexpr (CONCURRENT) {
-    if (curData.tag == KNOWN) {
-      galois::gDebug(node, " in bag as KNWON");
-    }
-    assert(curData.tag == BAND);
-} else {
-    assert(curData.tag != KNOWN);
-    if (curData.tag != BAND) {
-      galois::gDebug(node, " in heap with tag ", curData.tag);
-      std::abort();
-    }
-
-    // if (curData.solution != _old_sln) {
-    //   galois::gDebug("Wrong entry in the heap! ", node, " ", _old_sln, " but ", curData.solution);
-    //   for(auto i : wl) {
-    //     if (i.second == node)
-    //       galois::gDebug(i.first);
-    //   }
-    //   std::abort();
-    // }
-
-    {
-      auto [x, y, z] = getCoord(node);
-      if (curData.solution - std::sqrt(x * x + y * y + z * z) > max_error)
-        max_error = curData.solution - std::sqrt(x * x + y * y + z * z);
-      if (curData.solution - std::sqrt(x * x + y * y + z * z) > 0.2) {
-        galois::gDebug(curData.solution - std::sqrt(x * x + y * y + z * z),
-          " - wrong distance, should be ", std::sqrt(x * x + y * y + z * z));
-        assert(false);
+//     {
+//       auto [x, y, z] = getCoord(node);
+//       galois::gDebug("Hi! I'm ", node, " (", x, " ", y, " ", z, " ) with ", curData.solution);
+//       assert(curData.solution != INF);
+//     }
+// if constexpr (CONCURRENT) {
+//     if (curData.tag == KNOWN) {
+//       galois::gDebug(node, " in bag as KNWON");
+//     }
+//     assert(curData.tag == BAND);
+// } else {
+//     assert(curData.tag != KNOWN);
+//     if (curData.tag != BAND) {
+//       galois::gDebug(node, " in heap with tag ", curData.tag);
+//       std::abort();
+//     }
+// 
+//     {
+//       auto [x, y, z] = getCoord(node);
+//       if (curData.solution - std::sqrt(x * x + y * y + z * z) > max_error)
+//         max_error = curData.solution - std::sqrt(x * x + y * y + z * z);
+//       if (curData.solution - std::sqrt(x * x + y * y + z * z) > 0.2) {
+//         galois::gDebug(curData.solution - std::sqrt(x * x + y * y + z * z),
+//           " - wrong distance, should be ", std::sqrt(x * x + y * y + z * z));
+//         assert(false);
+//       }
+//     }
+// }
+#endif
+          dPoint.tag.store(KNOWN, atomic_order);
+        }  
       }
     }
-}
-#endif
-    curData.tag.store(KNOWN, atomic_order);
 
     // UpdateNeighbors
     for (auto e : graph.edges(node, no_lockable_flag)) {
-      GNode dst = graph.getEdgeDst(e);
-      if (dst < NUM_CELLS) {
-        auto& dstData = graph.getData(dst, no_lockable_flag);
-        assert(!dstData.is_ghost);
-        // chaotic execution: KNOWN neighbor doesn't suffice with smaller value
-        //   reason: circle-back update
-        //   ... but it holds with ordered serial execution
-        // smaller value doesn't suffice to be KNOWN - by-pass to be active
-        if (dstData.solution > curData.solution) {
-#ifndef NDEBUG
-          {
-            auto [x, y, z] = getCoord(dst);
-            galois::gDebug("Update ", dst, " (", x, " ", y, " ", z, " )");
-          }
-#endif
-          // assert(dstData.solution == INF && dstData.tag == FAR);
-          galois::gDebug("tag ", dstData.tag, ", sln ", dstData.solution);
-          SlnTy old_sln = dstData.solution.load(atomic_order);
-          // assert(old_sln > curData.solution); // not necessarily due to atomics
-          double sln_temp = CONCURRENT?
-            solveQuadratic(graph, dst, old_sln, dstData.speed) :
-            SerialSolveQuadratic(graph, dst, old_sln, dstData.speed);
-          if (sln_temp < galois::atomicMin(dstData.solution, sln_temp)) {
-            // galois::atomicMin(dstData.solution, sln_temp); // TODO safe to remove?
-            auto old_tag = dstData.tag.load(atomic_order);
-            if constexpr (CONCURRENT) {
-              if (old_tag != BAND) {
-                while (!dstData.tag.compare_exchange_weak(
-                                     old_tag, BAND, std::memory_order_relaxed));
-                wl.push(ItemTy{sln_temp, dst});
-              }
-            } else {
-              while (old_tag != BAND && !dstData.tag.compare_exchange_weak(
-                                     old_tag, BAND, std::memory_order_relaxed));
-              wl.push(ItemTy{sln_temp, dst}, old_sln);
-            }
-          } else {
-            galois::gDebug(dst, " solution not updated: ", sln_temp,
-              " (currently ", dstData.solution, ")");
+      GNode dsth = graph.getEdgeDst(e);
+      auto& dstData = graph.getData(dsth, no_lockable_flag);
+      if (dstData.dim() == 3) {
+        const auto& ids = dstData.getIds();
+        galois::gDebug(dsth, " ", ids[0], " ", ids[1], " ", ids[2]);
+        bool _debug = false;
+        // if (ids[0] == 31 && ids[1] == 32 && ids[2] == 19)
+        //   _debug = true;
+        // if (_debug) galois::gDebug("first");
+        int unknown = 3;
+        { // TODO make it something like if (dstData.tag != KNOWN)
+          for (int i = 0; i < dstData.dim(); ++i) {
+            auto& dPoint = getPointData(ids[i], no_lockable_flag);
+            if (_debug) galois::gDebug("KEY:", ids[i], " ", dPoint.tag.load(atomic_order), " sol. ", dPoint.solution.load(atomic_order));
+            if (dPoint.tag != KNOWN) {
+              // assert(dstData.solution.load(atomic_order) == INF || dstData.tag.load(atomic_order) != FAR);
+              if (unknown != 3) break; // TODO parallel conflict
+              unknown = i;
+            }  
           }
         }
+        if (unknown != 3) {
+        // if (_debug) galois::gDebug("second");
+#ifndef NDEBUG
+//           {
+//             auto [x, y, z] = getCoord(dst);
+//             galois::gDebug("Update ", dst, " (", x, " ", y, " ", z, " )");
+//           }
+#endif
+          // assert(dstData.solution == INF && dstData.tag == FAR);
+          auto& farPD = getPointData(ids[unknown], no_lockable_flag);
+          double tA = getPointData(ids[(unknown+1)%3], no_lockable_flag).solution.load(atomic_order);
+          double tB = getPointData(ids[(unknown+1)%3], no_lockable_flag).solution.load(atomic_order);
+          SlnTy old_sln [[maybe_unused]] = farPD.solution.load(atomic_order); // TODO remove
+          SlnTy sln_temp = CONCURRENT? 
+            // solveQuadratic(graph, dsth, old_sln, farPD.speed) :
+            SerialSolveQuadratic(dstData, unknown, farPD.speed, tA, tB) :
+            SerialSolveQuadratic(dstData, unknown, farPD.speed, tA, tB);
+          if (sln_temp < galois::atomicMin(farPD.solution, sln_temp) || farPD.tag == BAND) {
+        // if (_debug) galois::gDebug("third");
+            galois::gDebug("Hi! I'm ", dsth, " I got ", sln_temp);
+            auto old_tag = farPD.tag.load(atomic_order);
+            if constexpr (CONCURRENT) {
+              // if (old_tag != BAND) {
+                while (!farPD.tag.compare_exchange_weak(
+                                     old_tag, BAND, std::memory_order_relaxed));
+                wl.push(ItemTy{sln_temp, dsth});
+              // }
+            } else {
+        // if (_debug) galois::gDebug("fourth");
+              while (old_tag != BAND && !farPD.tag.compare_exchange_weak(
+                                     old_tag, BAND, std::memory_order_relaxed));
+              wl.push(ItemTy{sln_temp, dsth}, old_sln);
+            }
+          } else {
+            galois::gDebug(dsth, " solution not updated: ", sln_temp,
+              " (currently ", farPD.solution, ")");
+          }
+        }
+      } else {
+        // segments (dim() == 2)
+        const auto& ids = dstData.getIds();
+        galois::gDebug(dsth, " ", ids[0], " ", ids[1]);
       }
     }
   };
@@ -1085,12 +1119,12 @@ void BipartFastMarching(Graph& graph, WL& oddBag, WL& evenBag) {
 ////////////////////////////////////////////////////////////////////////////////
 // Algo
 
-template <bool CONCURRENT, typename WL,
+template <bool CONCURRENT, typename WL, typename PDM,
           typename Graph, typename BL>
-void runAlgo(Graph& graph, BL& boundary) {
+void runAlgo(Graph& graph, BL& boundary, PDM& getPointData) {
   WL initBag;
 
-  FirstIteration<CONCURRENT>(graph, boundary, initBag);
+  FirstIteration<CONCURRENT>(graph, boundary, initBag, getPointData);
 
   if (initBag.empty()) {
     galois::gDebug("No cell to be processed!");
@@ -1099,9 +1133,18 @@ void runAlgo(Graph& graph, BL& boundary) {
   } else {
     galois::gDebug("vvvvvvvv init band vvvvvvvv");
     for (auto [_, i] : initBag) {
-      auto [x, y, z] = getCoord(i);
-      galois::gDebug(i, " (", x, " ", y, " ", z, ") with ",
-        graph.getData(i, no_lockable_flag).solution);
+      auto& data = graph.getData(i, no_lockable_flag);
+      auto
+        v1 = data.getPoint(0),
+        v2 = data.getPoint(1),
+        v3 = data.getPoint(2);
+      auto [i1, i2, i3] = data.getIds();
+      double
+        t1 = getPointData(i1, no_lockable_flag).solution.load(atomic_order),
+        t2 = getPointData(i2, no_lockable_flag).solution.load(atomic_order),
+        t3 = getPointData(i3, no_lockable_flag).solution.load(atomic_order);
+      galois::gDebug(i, " (", v1, ", ", v2, ", ", v3, ") with ",
+        "[", t1, " ", t2, " ", t3, "]");
     }
     galois::gDebug("^^^^^^^^ init band ^^^^^^^^");
 
@@ -1110,9 +1153,11 @@ void runAlgo(Graph& graph, BL& boundary) {
       [&](auto pair) {
         galois::gDebug(pair.first, " : ", pair.second);
         auto [_, node] = pair;
-        auto& curData = graph.getData(node, no_lockable_flag);
-        if (curData.tag != BAND) {
-          galois::gDebug("non-BAND");
+        auto& data = graph.getData(node, no_lockable_flag);
+        for (auto i : data.getIds()) {
+          if (getPointData(i).tag != KNOWN) {
+            galois::gDebug("UNKNOWN");
+          }
         }
       },
       galois::no_stats(),
@@ -1121,7 +1166,7 @@ void runAlgo(Graph& graph, BL& boundary) {
 #endif // end of initBag sanity check;
   }
 
-  FastMarching<CONCURRENT>(graph, initBag);
+  FastMarching<CONCURRENT>(graph, initBag, getPointData);
 }
 
 template<typename Graph, typename WL>
@@ -1218,18 +1263,47 @@ void SanityCheck(Graph& graph) {
   galois::gPrint("max err: ", max_error.reduce(), "\n");
 }
 
-template <typename Graph,
+template <typename Graph, typename PDM,
           typename GNode = typename Graph::GraphNode>
-void SanityCheck2(Graph& graph) {
+void SanityCheck2(Graph& graph, PDM& getPointData) {
+  for (int i = 0; i < 40; ++i)
+    galois::gDebug(i, " ", getPointData(i).tag, " ", getPointData(i).solution);
+
+  galois::GReduceMax<double> max_difference;
+  galois::GReduceMax<double> max_edge;
+
   galois::do_all(
-    galois::iterate(0ul, NUM_CELLS),
-    [&](GNode node) noexcept {
-      auto [x, y, z] = getCoord(node);
-      auto &solution = graph.getData(node).solution;
-      assert(std::abs(solution - std::sqrt(x * x + y * y + z * z)));
+    galois::iterate(graph),
+    [&](GNode nh) noexcept {
+      auto& triangle_data = graph.getData(nh, no_lockable_flag);
+      std::array<Tuple, 3> tuples;
+      for (int i = 0; i < triangle_data.dim(); ++i) {
+        tuples[i] = triangle_data.getPoint(i);
+      }
+      auto& [A, B, C] = tuples;
+      max_edge.update(A.distance(B));
+      if (triangle_data.dim() == 3) {
+        max_edge.update(A.distance(C));
+        max_edge.update(B.distance(C));
+      }
+      auto& [iA, iB, iC] = triangle_data.getIds();
+      galois::gDebug(nh, " ", iA, " ", iB, " ", iC);
+      assert(getPointData(iA).solution < INF);
+      assert(getPointData(iB).solution < INF);
+      if (triangle_data.dim() == 3) {
+        assert(getPointData(iC).solution < INF);
+      }
+      max_difference.update(std::abs(getPointData(iA).solution - std::sqrt(A[0]*A[0] + A[1]*A[1])));
+      max_difference.update(std::abs(getPointData(iB).solution - std::sqrt(B[0]*B[0] + B[1]*B[1])));
+      if (triangle_data.dim() == 3) {
+        max_difference.update(std::abs(getPointData(iC).solution - std::sqrt(C[0]*C[0] + C[1]*C[1])));
+      }
     },
     galois::no_stats(),
     galois::loopname("sanityCheck2"));
+
+  galois::gPrint("max diff: ", max_difference.reduce(), "\n");
+  galois::gPrint("max edge: ", max_edge.reduce(), "\n");
 }
 
 template <typename GNode>
@@ -1242,6 +1316,24 @@ void _debug_print() {
 
 ////////////////////////////////////////////////////////////////////////////////
 
+template <typename T>
+class PointDataManager {
+  typedef T& reference;
+  galois::LargeArray<T> pointData;
+
+public:
+  PointDataManager(size_t numPoints) {
+    pointData.allocateInterleaved(numPoints);
+    for (size_t n = 0; n < numPoints; ++n) {
+      pointData.constructAt(n);
+    }
+  }
+
+  reference operator()(size_t N, galois::MethodFlag mflag = galois::MethodFlag::WRITE) {
+    return pointData[N];
+  }
+};
+
 int main(int argc, char** argv) noexcept {
   galois::SharedMemSys galois_system;
   LonestarStart(argc, argv, name, desc, url);
@@ -1249,78 +1341,107 @@ int main(int argc, char** argv) noexcept {
   galois::gDebug(ALGO_NAMES[algo]);
 
   // configure global variables
-  if (nh) nx = ny = nz = nh;
-  NUM_CELLS = nh? nh * nh * nh : nx * ny * nz;
-  dx = (xb - xa) / CoordTy(nx + 1);
-  dy = (yb - ya) / CoordTy(ny + 1);
-  dz = (zb - za) / CoordTy(nz + 1);
-  if (!RF) RF = 1 / std::min({dx, dy, dz}, std::less<CoordTy>{});
-  galois::gDebug(nx, " - ", ny, " - ", nz);
-  galois::gDebug(dx, " - ", dy, " - ", dz);
-  galois::gDebug("RF: ", RF);
+  // if (nh) nx = ny = nz = nh;
+  // NUM_CELLS = nh? nh * nh * nh : nx * ny * nz;
+  // dx = (xb - xa) / CoordTy(nx + 1);
+  // dy = (yb - ya) / CoordTy(ny + 1);
+  // dz = (zb - za) / CoordTy(nz + 1);
+  // if (!RF) RF = 1 / std::min({dx, dy, dz}, std::less<CoordTy>{});
+  // galois::gDebug(nx, " - ", ny, " - ", nz);
+  // galois::gDebug(dx, " - ", dy, " - ", dz);
+  // galois::gDebug("RF: ", RF);
 
-  using Graph = galois::graphs::LC_CSR_Graph<NodeData, void>
-                  ::with_no_lockable<true>::type;
+  using Graph = galois::graphs::MorphGraph<Element, void, false>; // directional = false
   using GNode = Graph::GraphNode;
+  Graph graph;
+  std::size_t numPoints;
+  {
+    Mesh mHelper;
+    bool parallelAllocate = false;
+    numPoints = mHelper.read(graph, filename.c_str(), parallelAllocate); // detAlgo == nondet);
+
+    for (auto ele : graph) {
+      auto& d = graph.getData(ele, no_lockable_flag);
+      if (d.isObtuse()) {
+        galois::gPrint(d.getId(), " ", d.dim(), " ");
+        Tuple A = d.getPoint(0);
+        Tuple B = d.getPoint(1);
+        Tuple C = d.getPoint(2);
+        A.print(std::cout); std::cout << " ";
+        B.print(std::cout); std::cout << " ";
+        C.print(std::cout); std::cout << " ";
+        std::cout << "\n";
+        std::cerr << d.getPoint(0).angle(d.getPoint(1), d.getPoint(2)) << "\n";
+        std::cerr << d.getPoint(1).angle(d.getPoint(0), d.getPoint(2)) << "\n";
+        std::cerr << d.getPoint(2).angle(d.getPoint(0), d.getPoint(1)) << "\n";
+        GALOIS_DIE("obtuse triangle detected");
+      }
+    }
+
+    Verifier<Graph, GNode, Element, Tuple> v;
+    if (!skipVerify && !v.verify(graph)) {
+      GALOIS_DIE("bad input mesh");
+    }
+  }
+  PointDataManager<NodeData> pdm{numPoints};
+
   using BL = galois::InsertBag<GNode>;
   using UpdateRequest = std::pair<SlnTy, GNode>;
   using HeapTy = FMMHeapWrapper<std::multimap<UpdateRequest::first_type,
                                               UpdateRequest::second_type>>;
   using WL = galois::InsertBag<UpdateRequest>;
-  // generate grids
-  Graph graph;
-  auto [num_nodes, num_cells, num_outer_faces, xy_low, xy_high, yz_low, yz_high,
-        xz_low, xz_high] = generate_grid(graph, nx, ny, nz);
-
-  // _debug_print();
-
+//  // generate grids
+//  Graph graph;
+//  auto [num_nodes, num_cells, num_outer_faces, xy_low, xy_high, yz_low, yz_high,
+//        xz_low, xz_high] = generate_grid(graph, nx, ny, nz);
+//
+//  // _debug_print();
+//
   // initialize all cells
-  initCells(graph, num_cells);
+  initCells(graph, pdm);
 
   // TODO better way for boundary settings?
   BL boundary;
-  if (source_type == scatter)
-    AssignBoundary<GNode>(boundary);
-  else
+  // if (source_type == scatter)
     AssignBoundary(graph, boundary);
+  // else
+  //  AssignBoundary(graph, boundary);
   assert(!boundary.empty() && "Boundary not defined!");
 
 #ifndef NDEBUG
   // print boundary
   galois::gDebug("vvvvvvvv boundary vvvvvvvv");
   for (GNode b : boundary) {
-    auto [x, y, z] = getCoord(b);
-    galois::gDebug(b, " (", x, ", ", y, ", ", z, ")");
+    auto& data = graph.getData(b, no_lockable_flag);
+    auto
+      v1 = data.getPoint(0),
+      v2 = data.getPoint(1),
+      v3 = data.getPoint(2);
+    galois::gDebug(b, " (", v1, ", ", v2, ", ", v3, ")");
   }
   galois::gDebug("^^^^^^^^ boundary ^^^^^^^^");
 #endif
 
-  initBoundary(graph, boundary);
+  initBoundary(graph, boundary, pdm);
 
   galois::StatTimer Tmain;
   Tmain.start();
 
   switch (algo) {
-  case serial:
-    runAlgo<false, HeapTy>(graph, boundary);
+  case serial2d:
+    runAlgo<false, HeapTy>(graph, boundary, pdm);
     break;
   case parallel:
-    runAlgo<true, WL>(graph, boundary);
-    break;
-  case partition:
-    partitionAlgo(graph, boundary);
-    break;
-  case bipartiteSync:
-    bipartAlgo(graph, boundary);
+    runAlgo<true, WL>(graph, boundary, pdm);
     break;
   default:
     std::abort();
   }
 
   Tmain.stop();
-
-  SanityCheck(graph);
-  // SanityCheck2(graph);
+//
+//  SanityCheck(graph);
+  SanityCheck2(graph, pdm);
 
   return 0;
 }
