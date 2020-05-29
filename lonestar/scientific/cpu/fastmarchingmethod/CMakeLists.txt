@@ -1,0 +1,13 @@
+# if(("${CMAKE_VERSION}" VERSION_GREATER 3.8.0) OR ("${CMAKE_VERSION}" VERSION_EQUAL 3.8.0))
+  app(grids_gen grids_gen.cpp)
+  set_property(TARGET grids_gen PROPERTY CXX_STANDARD 17)
+  app(fmm fmm.cpp speed_function.cpp boundary.cpp)
+  set_property(TARGET fmm PROPERTY CXX_STANDARD 17)
+  set_property(TARGET fmm APPEND PROPERTY COMPILE_FLAGS " -Werror=unused ")
+  app(fmm2d fmm2d.cpp speed_function.cpp boundary.cpp)
+  set_property(TARGET fmm2d PROPERTY CXX_STANDARD 17)
+  set_property(TARGET fmm2d APPEND PROPERTY COMPILE_FLAGS " -Werror=unused ")
+# else()
+#   message(WARNING "Cannot configure sweeps or other C++17 apps with a CMake version older than 3.8. Skipping.")
+# endif()
+

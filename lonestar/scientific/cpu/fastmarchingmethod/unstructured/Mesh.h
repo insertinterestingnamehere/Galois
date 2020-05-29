@@ -404,7 +404,7 @@ private:
          },
          galois::loopname("allocate"));
   }
-  void makeGraph(Graph& mesh, galois::graphs::read_with_aux_first_graph_tag tag, bool parallelAllocate) {
+  void makeGraph(Graph& mesh, galois::graphs::read_with_aux_first_graph_tag, bool parallelAllocate) {
     // std::sort(elements.begin(), elements.end(), centerXCmp());
     divide(elements.begin(), elements.end());
 
@@ -417,13 +417,14 @@ private:
     for (auto ii = mesh.begin(), ee = mesh.end(); ii != ee; ++ii)
       addElement(mesh, *ii, edge_map);
   }
-  void makeGraph(Graph& mesh, galois::graphs::read_default_graph_tag tag) { // TODO
+  void makeGraph(Graph& mesh [[maybe_unused]], galois::graphs::read_default_graph_tag) { // TODO unused for now
     galois::graphs::FileGraphWriter temp_graph;
     temp_graph.setNumNodes(elements.size());
     // delay setNumEdges
     temp_graph.setSizeofEdgeData(0);
 
     temp_graph.phase1();
+
     // Element& element = mesh.getData(node);
     // for (int i = 0; i < element.numEdges(); i++) {
     //   Edge edge = element.getEdge(i);

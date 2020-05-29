@@ -152,6 +152,35 @@ public:
 } // end namespace galois
 
 ////////////////////////////////////////////////////////////////////////////////
+// Code wrapper for non-GPU sync structure
+////////////////////////////////////////////////////////////////////////////////
+#ifndef GALOIS_ENABLE_GPU
+#define GALOIS_DECL_NON_GPU_SYNC_STRUCTURE                                     \
+  static bool extract_batch(unsigned, uint8_t*, size_t*, DataCommMode*) {      \
+    return false;                                                              \
+  }                                                                            \
+                                                                               \
+  static bool extract_batch(unsigned, uint8_t*) { return false; }              \
+                                                                               \
+  static bool extract_reset_batch(unsigned, uint8_t*, size_t*,                 \
+                                  DataCommMode*) {                             \
+    return false;                                                              \
+  }                                                                            \
+                                                                               \
+  static bool extract_reset_batch(unsigned, uint8_t*) { return false; }        \
+                                                                               \
+  static bool reset_batch(size_t, size_t) { return true; }                     \
+                                                                               \
+  static bool reduce_batch(unsigned, uint8_t*, DataCommMode) { return false; } \
+                                                                               \
+  static bool reduce_mirror_batch(unsigned, uint8_t*, DataCommMode) {          \
+    return false;                                                              \
+  }                                                                            \
+                                                                               \
+  static bool setVal_batch(unsigned, uint8_t*, DataCommMode) { return false; }
+#endif
+
+////////////////////////////////////////////////////////////////////////////////
 // Reduce Add, Edges
 ////////////////////////////////////////////////////////////////////////////////
 #ifdef GALOIS_ENABLE_GPU

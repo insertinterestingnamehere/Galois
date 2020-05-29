@@ -39,6 +39,9 @@ namespace galois {
 template <class T>
 class CopyableAtomic : public std::atomic<T> {
 public:
+  // galois copyable tag
+  using tt_is_copyable = int;
+
   //! Default constructor
   CopyableAtomic() : std::atomic<T>(T{}) {}
 

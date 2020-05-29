@@ -1,4 +1,5 @@
 add_subdirectory(barneshut)
 add_subdirectory(delaunayrefinement)
 add_subdirectory(delaunaytriangulation)
+add_subdirectory(fastmarchingmethod)
 add_subdirectory(longestedge)
