@@ -40,8 +40,9 @@
 #include "galois/Timer.h"
 #include "galois/runtime/Statitsics.h"
 #include "galois/substrate/PerThreadStorage.h"
-#include "galois/worklists/Fifo.h"
 #include "galois/worklists/Chunk.h"
+#include "galois/worklists/Fifo.h"
+#include "galois/worklists/Obim.h"
 #include "galois/worklists/WorkListHelpers.h"
 
 namespace galois {
@@ -74,6 +75,12 @@ namespace worklists {
  * @tparam uniformBSP Use uniform back-scan prevention
  * @tparam T Work item type
  * @tparam Index Indexer return type
+ * @tparam UseBarrier Eliminate priority inversions by placing a barrier
+ *                    between priority levels
+ * @tparam UseMonotonic Assume that an activity at priority p will not
+ *                      schedule work at priority p or any priority p1
+ *                      where p1 < p.
+ * @tparam UseDescending Use descending order instead
  * @tparam Concurrent Whether or not to allow concurrent execution
  *
  */
@@ -84,27 +91,40 @@ template<class Indexer = DummyIndexer<int>, typename Container = FIFO<>,
   int chunk_size=64,
   typename T=int,
   typename Index=int,
+  bool UseBarrier = false,
+  bool UseMonotonic = false,
+  bool UseDescending = false,
   bool Concurrent=true>
 struct AdaptiveOrderedByIntegerMetric : private boost::noncopyable {
-  template<bool _concurrent>
-  struct rethread { typedef AdaptiveOrderedByIntegerMetric<Indexer, typename Container::template rethread<_concurrent>::type, BlockPeriod, BSP, uniformBSP, chunk_size,T, Index, _concurrent> type; };
+  template<bool Concurrent_>
+  using rethread = AdaptiveOrderedByIntegerMetric<Indexer, typename Container::template rethread<_concurrent>::type, BlockPeriod, BSP, uniformBSP, chunk_size,T, Index, UseBarrier, UseMonotonic, UseDescending, Concurrent_>;
 
-  template<typename _T>
-  struct retype { typedef AdaptiveOrderedByIntegerMetric<Indexer, typename Container::template retype<_T>::type, BlockPeriod, BSP, uniformBSP,chunk_size, _T, typename std::result_of<Indexer(_T)>::type, Concurrent> type; };
+  template<typename T_>
+  using retype = AdaptiveOrderedByIntegerMetric<Indexer, typename Container::template retype<_T>::type, BlockPeriod, BSP, uniformBSP,chunk_size, T_, typename std::result_of<Indexer(_T)>::type, UseBarrier, UseMonotonic, UseDescending, Concurrent>;
 
-  template<unsigned _period>
-  struct with_block_period { typedef AdaptiveOrderedByIntegerMetric<Indexer, Container, _period, BSP, uniformBSP, chunk_size,T, Index, Concurrent> type; };
+  template<unsigned BlockPeriod_>
+  using with_block_period = AdaptiveOrderedByIntegerMetric<Indexer, Container, BlockPeriod_, BSP, uniformBSP, chunk_size,T, Index, UseBarrier, UseMonotonic, UseDescending, Concurrent>;
 
-  template<typename _container>
-  struct with_container { typedef AdaptiveOrderedByIntegerMetric<Indexer, _container, BlockPeriod, BSP, uniformBSP, chunk_size,T, Index, Concurrent> type; };
+  template<typename Container_>
+  using with_container = AdaptiveOrderedByIntegerMetric<Indexer, Container_, BlockPeriod, BSP, uniformBSP, chunk_size,T, Index, UseBarrier, UseMonotonic, UseDescending, Concurrent>;
 
-  template<typename _indexer>
-  struct with_indexer { typedef AdaptiveOrderedByIntegerMetric<_indexer, Container, BlockPeriod, BSP, uniformBSP, chunk_size,T, Index, Concurrent> type; };
+  template<typename Indexer_>
+  using with_indexer = AdaptiveOrderedByIntegerMetric<Indexer_, Container, BlockPeriod, BSP, uniformBSP, chunk_size,T, Index, UseBarrier, UseMonotonic, UseDescending, Concurrent>;
 
-  template<bool _bsp>
-  struct with_back_scan_prevention { typedef AdaptiveOrderedByIntegerMetric<Indexer, Container, BlockPeriod, _bsp, uniformBSP, chunk_size,T, Index, Concurrent> type; };
+  template<bool BSP_>
+  using with_back_scan_prevention = AdaptiveOrderedByIntegerMetric<Indexer, Container, BlockPeriod, BSP_, uniformBSP, chunk_size,T, Index, UseBarrier, UseMonotonic, UseDescending, Concurrent>;
+
+  template<bool UseBarrier_>
+  using with_barrier = AdaptiveOrderedByIntegerMetric<Indexer, Container, BlockPeriod, BSP, uniformBSP, chunk_size, T, Index, UseBarrier_, UseMonotonic, UseDescending, Concurrent>;
+
+  template <bool UseMonotonic_>
+  using with_monotonic = AdaptiveOrderedByIntegerMetric<Indexer, Container, BlockPeriod, BSP, uniformBSP, chunk_size, T, Index, UseBarrier, UseMonotonic_, UseDescending, Concurrent>;
+
+  template <bool UseDescending_>
+  using with_descending = AdaptiveOrderedByIntegerMetric<Indexer, Container, BlockPeriod, BSP, uniformBSP, chunk_size, T, Index, UseBarrier, UseMonotonic, UseDescending_, Concurrent>;
 
   typedef T value_type;
+  typedef Index index_type;
 
 private:
   unsigned int delta;
