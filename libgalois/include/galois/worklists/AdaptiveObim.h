@@ -313,8 +313,12 @@ private:
       Index minOfMin                       = std::numeric_limits<Index>::max();
       Index maxOfMax                       = std::numeric_limits<Index>::min();
       for (unsigned i = 0; i < runtime::activeThreads; ++i) {
-        minOfMin = std::min(minOfMin, current.getRemote(i)->minPrio);
-        maxOfMax = std::max(maxOfMax, current.getRemote(i)->maxPrio);
+        Index& otherMinPrio = current.getRemote(i)->minPrio;
+        minOfMin =
+            this->compare(minOfMin, otherMinPrio) ? minOfMin : otherMinPrio;
+        Index& otherMaxPrio = current.getRemote(i)->maxPrio;
+        maxOfMax =
+            this->compare(otherMaxPrio, maxOfMax) ? maxOfMax : otherMaxPrio;
         priosCreatedThisPeriod += current.getRemote(i)->priosLastPeriod;
         numPushesThisStep += current.getRemote(i)->pushesLastPeriod;
         allPmodDeqCounts += current.getRemote(i)->pmodAllDeq;
@@ -405,15 +409,18 @@ private:
     msS.k = 0;
     msS.d = 0;
     // Index msS = std::numeric_limits<Index>::min();
-    if (BSP) {
+    if (BSP && !UseMonotonic) {
       msS = p.scanStart;
       if (localLeader || uniformBSP) {
-        for (unsigned i = 0; i < runtime::activeThreads; ++i)
-          msS = std::min(msS, current.getRemote(i)->scanStart);
+        for (unsigned i = 0; i < runtime::activeThreads; ++i) {
+          Index& otherScanStart = current.getRemote(i)->scanStart;
+          if (this->compare(otherScanStart, msS))
+            msS = otherScanStart;
+        }
       } else {
-        msS = std::min(msS,
-                       current.getRemote(Runtime::LL::getLeaderForThread(myID))
-                           ->scanStart);
+        Index &otherScanStart = current.getRemote(substrate::ThreadPool::getLeader(myID);
+        if (this->compare(otherScanStart, msS))
+          msS = otherScanStart;
       }
     }
 
