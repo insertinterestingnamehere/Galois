@@ -272,9 +272,8 @@ private:
 
   // NB: Place dynamically growing masterLog after fixed-size PerThreadStorage
   // members to give higher likelihood of reclaiming PerThreadStorage
-  Runtime::PerThreadStorage<ThreadData> current;
-  Runtime::LL::PaddedLock<Concurrent> masterLock;
-  Galois::Timer clock;
+  substrate::PerThreadStorage<ThreadData> current;
+  substrate::PaddedLock<Concurrent> masterLock;
   MasterLog masterLog;
 
   Runtime::MM::FixedSizeAllocator heap;
@@ -523,7 +522,6 @@ public:
   AdaptiveOrderedByIntegerMetric(const Indexer& x = Indexer())
       : heap(sizeof(CTy)), current(this->earliest), masterVersion(0),
         indexer(x), {
-    clock.start();
     delta   = 0;
     counter = chunk_size;
     if (numberOfPris == 0) {
