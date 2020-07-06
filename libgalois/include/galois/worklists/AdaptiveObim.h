@@ -56,8 +56,8 @@ namespace worklists {
  *   int operator()(Item i) const { return i.index; }
  * };
  *
- * typedef Galois::WorkList::AdaptiveOrderedByIntegerMetric<Indexer> WL;
- * Galois::for_each<WL>(items.begin(), items.end(), Fn);
+ * typedef galois::WorkList::AdaptiveOrderedByIntegerMetric<Indexer> WL;
+ * galois::for_each<WL>(items.begin(), items.end(), Fn);
  * \endcode
  *
  * @tparam Indexer Indexer class
@@ -292,7 +292,7 @@ private:
   }
 
   GALOIS_ATTRIBUTE_NOINLINE
-  Galois::optional<T> slowPop(ThreadData& p) {
+  galois::optional<T> slowPop(ThreadData& p) {
     // Failed, find minimum bin
     // counter=100;
     p.slowPopsLastPeriod++;
@@ -426,7 +426,7 @@ private:
 
     for (auto ii = p.local.lower_bound(msS), ee = p.local.end(); ii != ee;
          ++ii) {
-      Galois::optional<T> retval;
+      galois::optional<T> retval;
       if ((retval = ii->second->pop())) {
         p.current   = ii->second;
         p.curIndex  = ii->first;
@@ -436,7 +436,7 @@ private:
       }
     }
     p.lock.unlock();
-    return Galois::optional<value_type>();
+    return galois::optional<value_type>();
   }
 
   GALOIS_ATTRIBUTE_NOINLINE
@@ -475,18 +475,18 @@ private:
   }
 
 public:
-  static Galois::Statistic* numberOfPris;
-  static Galois::Statistic* pmodNumDeq;
+  static galois::Statistic* numberOfPris;
+  static galois::Statistic* pmodNumDeq;
   AdaptiveOrderedByIntegerMetric(const Indexer& x = Indexer())
       : heap(sizeof(CTy)), current(this->earliest), masterVersion(0),
         indexer(x), {
     delta   = 0;
     counter = chunk_size;
     if (numberOfPris == 0) {
-      numberOfPris = new Galois::Statistic("numberOfPris");
+      numberOfPris = new galois::Statistic("numberOfPris");
     }
     if (pmodNumDeq == 0) {
-      pmodNumDeq = new Galois::Statistic("pmodNumDeq");
+      pmodNumDeq = new galois::Statistic("pmodNumDeq");
     }
   }
 
@@ -579,7 +579,7 @@ public:
     return push(rp.first, rp.second);
   }
 
-  Galois::optional<value_type> pop() {
+  galois::optional<value_type> pop() {
     // Find a successful pop
     (*pmodNumDeq) += 1;
     ThreadData& p = *current.getLocal();
@@ -644,7 +644,7 @@ public:
         (BlockPeriod < 0 || (p.numPops++ & ((1ull << BlockPeriod) - 1) == 0)))
       return slowPop(p);
 
-    Galois::optional<value_type> retval;
+    galois::optional<value_type> retval;
     if (C && (retval = C->pop())) {
       p.popsFromSameQ++;
       p.lock.unlock();
