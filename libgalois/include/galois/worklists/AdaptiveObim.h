@@ -23,15 +23,6 @@
 
 // #define UNMERGE_ENABLED
 
-//#define OBIM_ADAP_DBG
-#ifdef OBIM_ADAP_DBG
-#define ERR_MSG std::cout
-#else
-#define ERR_MSG                                                                \
-  if (0)                                                                       \
-  std::cout
-#endif
-
 #include <atomic>
 #include <iostream>
 #include <limits>
@@ -282,7 +273,6 @@ private:
 
   bool updateLocal(ThreadData& p) {
     if (p.lastMasterVersion != masterVersion.load(std::memory_order_relaxed)) {
-      // masterLock.lock();
       for (;
            p.lastMasterVersion < masterVersion.load(std::memory_order_relaxed);
            ++p.lastMasterVersion) {
@@ -296,7 +286,6 @@ private:
         assert(logEntry.second);
 #endif
       }
-      // masterLock.unlock();
       return true;
     }
     return false;
@@ -307,15 +296,14 @@ private:
     // Failed, find minimum bin
     // counter=100;
     p.slowPopsLastPeriod++;
-    unsigned myID = Runtime::LL::getTID();
+    unsigned myID = galois::substrate::ThreadPool::getTID();
 
     // first give it some time
     // then check the fdeq frequency
     if (myID == 0 && p.sinceLastFix > counter &&
         ((double)(p.slowPopsLastPeriod) / (double)(p.sinceLastFix)) >
             1.0 / (double)(chunk_size)) {
-      // std::cout<<"Master Log Size: "<<masterLog.size()<<std::endl;
-      for (unsigned i = 1; i < Runtime::activeThreads; ++i) {
+      for (unsigned i = 1; i < runtime::activeThreads; ++i) {
         while (current.getRemote(i)->lock.try_lock())
           ;
       }
@@ -324,18 +312,9 @@ private:
       unsigned long allPmodDeqCounts       = 0;
       Index minOfMin                       = std::numeric_limits<Index>::max();
       Index maxOfMax                       = std::numeric_limits<Index>::min();
-      ERR_MSG << "Locked everyone else" << std::endl;
-      for (unsigned i = 0; i < Runtime::activeThreads; ++i) {
-        //  ERR_MSG<<"Thread i: "<<i<<" numPopsSinceLastFix
-        //  "<<current.getRemote(i)->sinceLastFix<<std::endl; ERR_MSG<<"\tThread
-        //  i: "<<i<<" pushesLastPeriod
-        //  "<<current.getRemote(i)->pushesLastPeriod<<std::endl;
-        //  ERR_MSG<<"\tThread i: "<<i<<" priosLastPeriod
-        //  "<<current.getRemote(i)->priosLastPeriod<<std::endl;
+      for (unsigned i = 0; i < runtime::activeThreads; ++i) {
         minOfMin = std::min(minOfMin, current.getRemote(i)->minPrio);
         maxOfMax = std::max(maxOfMax, current.getRemote(i)->maxPrio);
-        // ERR_MSG<<"\tThread i: "<<i<<" maxPrioDiffLastPeriod
-        // "<<current.getRemote(i)->maxPrioDiffLastPeriod<<std::endl;
         priosCreatedThisPeriod += current.getRemote(i)->priosLastPeriod;
         numPushesThisStep += current.getRemote(i)->pushesLastPeriod;
         allPmodDeqCounts += current.getRemote(i)->pmodAllDeq;
@@ -355,33 +334,13 @@ private:
         double xx = ((double)(chunk_size) /
                      ((double)numPushesThisStep /
                       ((double)((maxOfMax >> delta) - (minOfMin >> delta)))));
-        ERR_MSG << "Chunk size over " << xx << std::endl;
-        ERR_MSG << "Delta increase: " << std::log2(xx) << std::endl;
         delta += std::floor(std::log2(xx));
-        std::cout << "Delta " << delta << " " << (allPmodDeqCounts)
-                  << std::endl;
         counter *= 2;
-        // ERR_MSG<<"Increase delta by "<<((maxOfMax>>delta) -
-        // (minOfMin>>delta))/16<<std::endl;
       }
 
-      for (unsigned i = 1; i < Runtime::activeThreads; ++i) {
+      for (unsigned i = 1; i < runtime::activeThreads; ++i) {
         current.getRemote(i)->lock.unlock();
       }
-      // counter*=2;
-      ERR_MSG << "Priorities created for this step " << priosCreatedThisPeriod
-              << std::endl;
-      ERR_MSG << "Push/Prio ratio "
-              << ((double)(priosCreatedThisPeriod) /
-                  (double)(numPushesThisStep))
-              << std::endl;
-      ERR_MSG << "Min " << minOfMin << " max " << maxOfMax << " bins "
-              << (minOfMin >> delta) << " " << (maxOfMax >> delta) << " pushes "
-              << numPushesThisStep << " Ratio "
-              << ((double)numPushesThisStep /
-                  ((double)((maxOfMax >> delta) - (minOfMin >> delta))))
-              << std::endl;
-      ERR_MSG << "Unlocked everyone else" << std::endl;
     }
 #ifdef UNMERGE_ENABLED
     // serif added here
@@ -389,35 +348,27 @@ private:
     // give it some time and check the same queue pops
     else if (delta > 0 && myID == 0 && p.sinceLastFix > counter &&
              p.popsFromSameQ > 4 * chunk_size) {
-      // std::cout<<"1Same queue dequeue"<<std::endl;
       if (((p.maxPrio >> delta) - (p.minPrio >> delta)) < 16 &&
           ((double)p.pushesLastPeriod /
            ((double)((p.maxPrio >> delta) - (p.minPrio >> delta)))) >
               4 * chunk_size) { // this is a check to make sure we are also
                                 // pushing with the same frequency end of
                                 // execution
-        // std::cout<<"Same queue dequeue "<<p.ctr<<"
-        // "<<masterLog.size()<<std::endl;
-        // std::cout<<((p.maxPrio>>delta)-(p.minPrio>>delta))<<std::endl;
         double diff = ((p.maxPrio >> delta) - (p.minPrio >> delta)) >= 1
                           ? ((p.maxPrio >> delta) - (p.minPrio >> delta))
                           : 1;
         double xx = 16 / diff;
-        std::cout << delta << " " << std::floor(std::log2(xx)) << " " << xx
-                  << std::endl;
         if (delta > (unsigned int)(std::floor(std::log2(xx))))
           delta -= (unsigned int)(std::floor(std::log2(xx)));
         else
           delta = 0;
-        std::cout << "Delta decreased to" << delta << std::endl;
 
-        for (unsigned i = 1; i < Runtime::activeThreads; ++i) {
+        for (unsigned i = 1; i < runtime::activeThreads; ++i) {
           while (current.getRemote(i)->lock.try_lock())
             ;
         }
 
-        ERR_MSG << "Locked everyone else" << std::endl;
-        for (unsigned i = 0; i < Runtime::activeThreads; ++i) {
+        for (unsigned i = 0; i < runtime::activeThreads; ++i) {
 
           current.getRemote(i)->sinceLastFix          = 0;
           current.getRemote(i)->slowPopsLastPeriod    = 0;
@@ -430,7 +381,7 @@ private:
           // current.getRemote(i)->lock.unlock();
         }
 
-        for (unsigned i = 1; i < Runtime::activeThreads; ++i) {
+        for (unsigned i = 1; i < runtime::activeThreads; ++i) {
           current.getRemote(i)->lock.unlock();
         }
         p.ctr++;
@@ -448,7 +399,7 @@ private:
     // p.lastNumPops=p.numPops;
     updateLocal(p);
     // unsigned myID = Runtime::LL::getTID();
-    bool localLeader = Runtime::LL::isPackageLeaderForSelf(myID);
+    bool localLeader = substrate::ThreadPool::isLeader();
 
     deltaIndex msS;
     msS.k = 0;
@@ -457,7 +408,7 @@ private:
     if (BSP) {
       msS = p.scanStart;
       if (localLeader || uniformBSP) {
-        for (unsigned i = 0; i < Runtime::activeThreads; ++i)
+        for (unsigned i = 0; i < runtime::activeThreads; ++i)
           msS = std::min(msS, current.getRemote(i)->scanStart);
       } else {
         msS = std::min(msS,
@@ -526,13 +477,9 @@ public:
     counter = chunk_size;
     if (numberOfPris == 0) {
       numberOfPris = new Galois::Statistic("numberOfPris");
-      //(*numberOfPris )=0;
-      std::cout << "Number of Pris statistics created\n";
     }
     if (pmodNumDeq == 0) {
       pmodNumDeq = new Galois::Statistic("pmodNumDeq");
-      //(*numberOfPris )=0;
-      std::cout << "pmodNumDeq statistics created\n";
     }
   }
 
@@ -548,21 +495,11 @@ public:
       heap.deallocate(lC);
     }
 
-    std::cout << "Final delta " << delta << std::endl;
-    // print incomplete pop
-    // for (unsigned i = 0; i < Runtime::activeThreads; ++i){
-    //   std::cout<<"Thread i:"<<i<<" incomplete pops:
-    //   "<<current.getRemote(i)->incompleteChunks<<" consec. incomplete pops:
-    //   "<<current.getRemote(i)->consec1IncompleteChunks<<std::endl;
-    // }
-
     if (numberOfPris != 0) {
-      std::cout << "Number of Pris statistics dealloced\n";
       delete numberOfPris;
       // numberOfPris=NULL;
     }
     if (pmodNumDeq != 0) {
-      std::cout << "pmodNumDeq statistics dealloced\n";
       delete pmodNumDeq;
       // numberOfPris=NULL;
     }
