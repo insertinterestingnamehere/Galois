@@ -24,6 +24,7 @@
 // #define UNMERGE_ENABLED
 
 #include <atomic>
+#include <cmath>
 #include <iostream>
 #include <limits>
 #include <type_traits>
@@ -31,10 +32,9 @@
 #include "galois/config.h"
 #include "galois/FlatMap.h"
 #include "galois/Timer.h"
-#include "galois/runtime/Statitsics.h"
+#include "galois/substrate/PaddedLock.h"
 #include "galois/substrate/PerThreadStorage.h"
 #include "galois/worklists/Chunk.h"
-#include "galois/worklists/Fifo.h"
 #include "galois/worklists/Obim.h"
 #include "galois/worklists/WorkListHelpers.h"
 
@@ -77,22 +77,23 @@ namespace worklists {
  * @tparam Concurrent Whether or not to allow concurrent execution
  *
  */
-template <class Indexer = DummyIndexer<int>, typename Container = FIFO<>,
-          int BlockPeriod = 0, bool BSP = true, bool uniformBSP = false,
-          int chunk_size = 64, typename T = int, typename Index = int,
-          bool UseBarrier = false, bool UseMonotonic = false,
-          bool UseDescending = false, bool Concurrent = true>
+template <class Indexer      = DummyIndexer<int>,
+          typename Container = PerSocketChunkFIFO<>, int BlockPeriod = 0,
+          bool BSP = true, bool uniformBSP = false, int chunk_size = 64,
+          typename T = int, typename Index = int, bool UseBarrier = false,
+          bool UseMonotonic = false, bool UseDescending = false,
+          bool Concurrent = true>
 struct AdaptiveOrderedByIntegerMetric : private boost::noncopyable {
   template <bool Concurrent_>
   using rethread = AdaptiveOrderedByIntegerMetric<
-      Indexer, typename Container::template rethread<_concurrent>::type,
+      Indexer, typename Container::template rethread<Concurrent_>::type,
       BlockPeriod, BSP, uniformBSP, chunk_size, T, Index, UseBarrier,
       UseMonotonic, UseDescending, Concurrent_>;
 
   template <typename T_>
   using retype = AdaptiveOrderedByIntegerMetric<
-      Indexer, typename Container::template retype<_T>::type, BlockPeriod, BSP,
-      uniformBSP, chunk_size, T_, typename std::result_of<Indexer(_T)>::type,
+      Indexer, typename Container::template retype<T_>::type, BlockPeriod, BSP,
+      uniformBSP, chunk_size, T_, typename std::result_of<Indexer(T_)>::type,
       UseBarrier, UseMonotonic, UseDescending, Concurrent>;
 
   template <unsigned BlockPeriod_>
@@ -249,7 +250,7 @@ private:
     Index maxPrioDiffLastPeriod;
     Index minPrio;
     Index maxPrio;
-    Runtime::LL::PaddedLock<Concurrent> lock;
+    substrate::PaddedLock<Concurrent> lock;
 
     ThreadData(Index initial)
         : curIndex(initial), scanStart(initial), current(0),
@@ -267,7 +268,7 @@ private:
   substrate::PaddedLock<Concurrent> masterLock;
   MasterLog masterLog;
 
-  Runtime::MM::FixedSizeAllocator heap;
+  galois::runtime::FixedSizeHeap heap;
   std::atomic<unsigned int> masterVersion;
   Indexer indexer;
 
@@ -402,7 +403,6 @@ private:
 
     // p.lastNumPops=p.numPops;
     updateLocal(p);
-    // unsigned myID = Runtime::LL::getTID();
     bool localLeader = substrate::ThreadPool::isLeader();
 
     deltaIndex msS;
@@ -418,7 +418,8 @@ private:
             msS = otherScanStart;
         }
       } else {
-        Index &otherScanStart = current.getRemote(substrate::ThreadPool::getLeader(myID);
+        Index& otherScanStart =
+            current.getRemote(substrate::getThreadPool().getLeader(myID));
         if (this->compare(otherScanStart, msS))
           msS = otherScanStart;
       }
@@ -456,7 +457,6 @@ private:
       p.lastMasterVersion = masterVersion.load(std::memory_order_relaxed) + 1;
       masterLog.push_back(std::make_pair(i, lC2));
       masterVersion.fetch_add(1);
-      (*numberOfPris) += 1;
       p.priosLastPeriod++;
       // perPriorityCntr[i]=0;
     }
@@ -477,7 +477,7 @@ private:
 public:
   AdaptiveOrderedByIntegerMetric(const Indexer& x = Indexer())
       : heap(sizeof(CTy)), current(this->earliest), masterVersion(0),
-        indexer(x), {
+        indexer(x) {
     delta   = 0;
     counter = chunk_size;
   }
@@ -569,7 +569,7 @@ public:
 
     p.sinceLastFix++;
 
-    unsigned myID = Runtime::LL::getTID();
+    unsigned myID = galois::substrate::ThreadPool::getTID();
 
     current.getRemote(myID)->pmodAllDeq++;
     /*
@@ -638,9 +638,6 @@ public:
   }
 };
 GALOIS_WLCOMPILECHECK(AdaptiveOrderedByIntegerMetric)
-template <class Indexer, typename Container, int BlockPeriod, bool BSP,
-          bool uniformBSP, int chunk_size, typename T, typename Index,
-          bool Concurrent>
 } // namespace worklists
 } // namespace galois
 
