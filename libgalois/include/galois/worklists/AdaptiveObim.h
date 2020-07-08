@@ -475,19 +475,11 @@ private:
   }
 
 public:
-  static galois::Statistic* numberOfPris;
-  static galois::Statistic* pmodNumDeq;
   AdaptiveOrderedByIntegerMetric(const Indexer& x = Indexer())
       : heap(sizeof(CTy)), current(this->earliest), masterVersion(0),
         indexer(x), {
     delta   = 0;
     counter = chunk_size;
-    if (numberOfPris == 0) {
-      numberOfPris = new galois::Statistic("numberOfPris");
-    }
-    if (pmodNumDeq == 0) {
-      pmodNumDeq = new galois::Statistic("pmodNumDeq");
-    }
   }
 
   ~AdaptiveOrderedByIntegerMetric() {
@@ -500,15 +492,6 @@ public:
       CTy* lC = ii->second;
       lC->~CTy();
       heap.deallocate(lC);
-    }
-
-    if (numberOfPris != 0) {
-      delete numberOfPris;
-      // numberOfPris=NULL;
-    }
-    if (pmodNumDeq != 0) {
-      delete pmodNumDeq;
-      // numberOfPris=NULL;
     }
   }
 
@@ -580,8 +563,6 @@ public:
   }
 
   galois::optional<value_type> pop() {
-    // Find a successful pop
-    (*pmodNumDeq) += 1;
     ThreadData& p = *current.getLocal();
     while (!p.lock.try_lock())
       ;
@@ -660,15 +641,6 @@ GALOIS_WLCOMPILECHECK(AdaptiveOrderedByIntegerMetric)
 template <class Indexer, typename Container, int BlockPeriod, bool BSP,
           bool uniformBSP, int chunk_size, typename T, typename Index,
           bool Concurrent>
-Statistic* AdaptiveOrderedByIntegerMetric<Indexer, Container, BlockPeriod, BSP,
-                                          uniformBSP, chunk_size, T, Index,
-                                          Concurrent>::numberOfPris;
-template <class Indexer, typename Container, int BlockPeriod, bool BSP,
-          bool uniformBSP, int chunk_size, typename T, typename Index,
-          bool Concurrent>
-Statistic* AdaptiveOrderedByIntegerMetric<Indexer, Container, BlockPeriod, BSP,
-                                          uniformBSP, chunk_size, T, Index,
-                                          Concurrent>::pmodNumDeq;
 } // namespace worklists
 } // namespace galois
 
