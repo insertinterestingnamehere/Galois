@@ -156,13 +156,13 @@ private:
     deltaIndex(Index k1, unsigned int d1) : k(k1), d(d1) {}
     unsigned int id() { return k; }
     bool operator==(const deltaIndex& a) const {
-      unsigned delt = std::max(d, a.d);
+      unsigned delt = this->compare(d, a.d) ? a.d : d;
       Index a1      = k >> delt;
       Index a2      = a.k >> delt;
       return (a1 == a2 && d == a.d);
     }
     bool operator<(const deltaIndex& a) const {
-      unsigned delt = std::max(d, a.d);
+      unsigned delt = this->compare(d, a.d) ? a.d : d;
       Index a1      = k >> delt;
       Index a2      = a.k >> delt;
       if (a1 < a2)
@@ -175,7 +175,7 @@ private:
       // return (k == a.k && d == a.d);
     }
     bool operator>(const deltaIndex& a) const {
-      unsigned delt = std::max(d, a.d);
+      unsigned delt = this->compare(d, a.d) ? a.d : d;
       Index a1      = k >> delt;
       Index a2      = a.k >> delt;
       if (a1 > a2)
@@ -188,7 +188,7 @@ private:
       // return (k == a.k && d == a.d);
     }
     bool operator<=(const deltaIndex& a) const {
-      unsigned delt = std::max(d, a.d);
+      unsigned delt = this->compare(d, a.d) ? a.d : d;
       Index a1      = k >> delt;
       Index a2      = a.k >> delt;
       if (a1 < a2)
@@ -203,7 +203,7 @@ private:
       // return (k == a.k && d == a.d);
     }
     bool operator>=(const deltaIndex& a) const {
-      unsigned delt = std::max(d, a.d);
+      unsigned delt = this->compare(d, a.d) ? a.d : d;
       Index a1      = k >> delt;
       Index a2      = a.k >> delt;
       if (a1 > a2)
