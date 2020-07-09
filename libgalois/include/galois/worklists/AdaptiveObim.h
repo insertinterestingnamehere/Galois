@@ -86,13 +86,13 @@ template <class Indexer      = DummyIndexer<int>,
 struct AdaptiveOrderedByIntegerMetric : private boost::noncopyable {
   template <bool Concurrent_>
   using rethread = AdaptiveOrderedByIntegerMetric<
-      Indexer, typename Container::template rethread<Concurrent_>::type,
+      Indexer, typename Container::template rethread<Concurrent_>,
       BlockPeriod, BSP, uniformBSP, chunk_size, T, Index, UseBarrier,
       UseMonotonic, UseDescending, Concurrent_>;
 
   template <typename T_>
   using retype = AdaptiveOrderedByIntegerMetric<
-      Indexer, typename Container::template retype<T_>::type, BlockPeriod, BSP,
+      Indexer, typename Container::template retype<T_>, BlockPeriod, BSP,
       uniformBSP, chunk_size, T_, typename std::result_of<Indexer(T_)>::type,
       UseBarrier, UseMonotonic, UseDescending, Concurrent>;
 
@@ -140,7 +140,7 @@ private:
   unsigned int maxIndex;
   unsigned int lastSizeMasterLog;
 
-  typedef typename Container::template rethread<Concurrent>::type CTy;
+  typedef typename Container::template rethread<Concurrent> CTy;
   typedef internal::OrderedByIntegerMetricComparator<Index, UseDescending>
       Comparator;
   typedef typename Comparator::template with_local_map<CTy*>::type LMapTy;
