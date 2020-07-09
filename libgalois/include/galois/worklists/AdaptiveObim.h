@@ -83,12 +83,15 @@ template <class Indexer      = DummyIndexer<int>,
           typename T = int, typename Index = int, bool UseBarrier = false,
           bool UseMonotonic = false, bool UseDescending = false,
           bool Concurrent = true>
-struct AdaptiveOrderedByIntegerMetric : private boost::noncopyable {
+struct AdaptiveOrderedByIntegerMetric
+    : private boost::noncopyable,
+      public internal::OrderedByIntegerMetricData<T, Index, UseBarrier>,
+      public internal::OrderedByIntegerMetricComparator<Index, UseDescending> {
   template <bool Concurrent_>
   using rethread = AdaptiveOrderedByIntegerMetric<
-      Indexer, typename Container::template rethread<Concurrent_>,
-      BlockPeriod, BSP, uniformBSP, chunk_size, T, Index, UseBarrier,
-      UseMonotonic, UseDescending, Concurrent_>;
+      Indexer, typename Container::template rethread<Concurrent_>, BlockPeriod,
+      BSP, uniformBSP, chunk_size, T, Index, UseBarrier, UseMonotonic,
+      UseDescending, Concurrent_>;
 
   template <typename T_>
   using retype = AdaptiveOrderedByIntegerMetric<
