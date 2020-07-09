@@ -143,11 +143,6 @@ private:
   unsigned int maxIndex;
   unsigned int lastSizeMasterLog;
 
-  typedef typename Container::template rethread<Concurrent> CTy;
-  typedef internal::OrderedByIntegerMetricComparator<Index, UseDescending>
-      Comparator;
-  typedef typename Comparator::template with_local_map<CTy*>::type LMapTy;
-
   // indexing mechanism
   // smaller delta insertions are prioritirized
   struct deltaIndex {
@@ -227,6 +222,11 @@ private:
       return *this;
     }
   };
+
+  typedef typename Container::template rethread<Concurrent> CTy;
+  typedef internal::OrderedByIntegerMetricComparator<Index, UseDescending>
+      Comparator;
+  typedef galois::flat_map<deltaIndex, CTy*> LMapTy;
 
   struct ThreadData
       : public internal::OrderedByIntegerMetricData<T, Index,
@@ -479,7 +479,7 @@ private:
 
 public:
   AdaptiveOrderedByIntegerMetric(const Indexer& x = Indexer())
-      : heap(sizeof(CTy)), current(this->earliest), masterVersion(0),
+      : current(this->earliest), heap(sizeof(CTy)), masterVersion(0),
         indexer(x) {
     delta   = 0;
     counter = chunk_size;
