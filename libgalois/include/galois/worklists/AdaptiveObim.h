@@ -502,7 +502,7 @@ public:
     ThreadData& p = *current.getLocal();
     while (!p.lock.try_lock())
       ;
-    Index ind = val();
+    Index ind = indexer(val);
     //(val()>>delta)+maxIndex;//indexer(val);
     deltaIndex index;
     index.k = ind;
