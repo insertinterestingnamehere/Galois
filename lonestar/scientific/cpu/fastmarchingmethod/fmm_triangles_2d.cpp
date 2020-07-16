@@ -18,7 +18,6 @@
  */
 
 #include <algorithm>
-#include <array>
 #include <atomic>
 #include <cmath>
 #include <fstream>
@@ -50,95 +49,84 @@
 
 #include "galois/runtime/Profile.h"
 
-static char const* name = "FMM";
-static char const* desc = "fmm";
-static char const* url  = "";
+static char const* name = "Fast Marching Method";
+static char const* desc =
+    "Eikonal equation solver "
+    "(https://en.wikipedia.org/wiki/Fast_marching_method)";
+static char const* url = "";
 
-using CoordTy = double;
-using SlnTy   = double;
-
-enum Algo { serial = 0, parallel, serial2d, partition, bipartiteSync };
-enum Source { scatter = 0, analytical };
-
-const char* const ALGO_NAMES[] = {"serial", "parallel", "serial2d", "partition",
-                                  "bipartiteSync"};
+using data_t         = double;
+constexpr data_t INF = std::numeric_limits<data_t>::max();
 
 static llvm::cl::opt<std::string> filename(llvm::cl::Positional,
                                            llvm::cl::desc("<input file>"),
                                            llvm::cl::Required);
 
+enum Algo { serial = 0, parallel };
+enum SourceType { scatter = 0, analytical };
+
+const char* const ALGO_NAMES[] = {"serial", "parallel"};
+
+static llvm::cl::OptionCategory catAlgo("Algorithmic Options");
 static llvm::cl::opt<Algo>
-    algo("algo", llvm::cl::desc("Choose an algorithm:"),
-         llvm::cl::values(clEnumVal(serial2d, "serial2d"),
-                          clEnumVal(parallel, "parallel"),
-                          clEnumVal(partition, "partition"),
-                          clEnumVal(bipartiteSync, "bipartiteSync")),
-         llvm::cl::init(parallel));
-static llvm::cl::opt<int> dimension{
-    "dimension", llvm::cl::desc("number of dimensions worked on"),
-    llvm::cl::init(2)};
-static llvm::cl::opt<Source> source_type(
-    "source", llvm::cl::desc("Choose an sourceType:"),
+    algo("algo", llvm::cl::desc("Choose an algorithm (default parallel):"),
+         llvm::cl::values(clEnumVal(serial, "serial heap implementation"),
+                          clEnumVal(parallel, "parallel implementation")),
+         llvm::cl::init(parallel), llvm::cl::cat(catAlgo));
+static llvm::cl::opt<unsigned> RF{"rf",
+                                  llvm::cl::desc("round-off factor for OBIM"),
+                                  llvm::cl::init(0u), llvm::cl::cat(catAlgo)};
+
+static llvm::cl::OptionCategory catInput("Input Options");
+static llvm::cl::opt<SourceType> source_type(
+    "sourceFormat", llvm::cl::desc("Choose an source format:"),
     llvm::cl::values(clEnumVal(scatter, "a set of discretized points"),
                      clEnumVal(analytical, "boundary in a analytical form")),
-    llvm::cl::init(analytical));
+    llvm::cl::init(analytical), llvm::cl::cat(catInput));
+// TODO parameterize the following
+static constexpr data_t xa = -.5, xb = .5;
+static constexpr data_t ya = -.5, yb = .5;
+static constexpr data_t za = -.5, zb = .5;
+
+static llvm::cl::OptionCategory catDisc("Discretization options");
 static llvm::cl::opt<unsigned long long> nh{
-    "nh", llvm::cl::desc("number of cells in ALL direction"),
-    llvm::cl::init(0u)};
+    "nh",
+    llvm::cl::desc("number of cells in ALL direction. NOTE: this will override "
+                   "nx, ny, nz."),
+    llvm::cl::init(0u), llvm::cl::cat(catDisc)};
 static llvm::cl::opt<unsigned long long> nx{
-    "nx", llvm::cl::desc("number of cells in x direction"),
-    llvm::cl::init(10u)};
+    "nx", llvm::cl::desc("number of cells in x direction"), llvm::cl::init(10u),
+    llvm::cl::cat(catDisc)};
 static llvm::cl::opt<unsigned long long> ny{
-    "ny", llvm::cl::desc("number of cells in y direction"),
-    llvm::cl::init(10u)};
+    "ny", llvm::cl::desc("number of cells in y direction"), llvm::cl::init(10u),
+    llvm::cl::cat(catDisc)};
 static llvm::cl::opt<unsigned long long> nz{
-    "nz", llvm::cl::desc("number of cells in z direction"),
-    llvm::cl::init(10u)};
-static llvm::cl::opt<unsigned> RF{
-    "rf", llvm::cl::desc("round-off factor for OBIM"), llvm::cl::init(0u)};
-// static llvm::cl::opt<CoordTy> num_groups{
-//     "num_groups", llvm::cl::desc("number of frequency groups"),
-//     llvm::cl::init(4u)};
-// static llvm::cl::opt<CoordTy> num_vert_directions{
-//     "num_vert_directions", llvm::cl::desc("number of vertical directions"),
-//     llvm::cl::init(16u)};
-// static llvm::cl::opt<CoordTy> num_horiz_directions{
-//     "num_horiz_directions", llvm::cl::desc("number of horizontal
-//     directions."), llvm::cl::init(32u)};
-// static llvm::cl::opt<unsigned long long> num_iters{
-//    "num_iters", llvm::cl::desc("number of iterations"), llvm::cl::init(10u)};
-// static llvm::cl::opt<double> pulse_strength{
-//    "pulse_strength", llvm::cl::desc("radiation pulse strength"),
-//    llvm::cl::init(1.)};
-// static llvm::cl::opt<double> absorption_coef{
-//     "absorption_coef",
-//     llvm::cl::desc("Absorption coefficient (between 0 and 1), absorption and
-//     "
-//                    "scattering must sum to less than 1."),
-//     llvm::cl::init(.01)};
-// static llvm::cl::opt<double> scattering_coef{
-//     "scattering_coef",
-//     llvm::cl::desc("Scattering coefficient (between 0 and 1), absorption and
-//     "
-//                    "scattering must sum to less than 1."),
-//     llvm::cl::init(.25)};
-// static llvm::cl::opt<bool> print_convergence{
-//     "print_convergence",
-//     llvm::cl::desc("Print the max change in amount of scattering at a given "
-//                    "each iteration."),
-//     llvm::cl::init(false)};
-// static llvm::cl::opt<std::string> scattering_outfile{
-//     "scattering_outfile",
-//     llvm::cl::desc(
-//         "Text file name to use to write final scattering term values "
-//         "after each step."),
-//     llvm::cl::init("")};
+    "nz", llvm::cl::desc("number of cells in z direction"), llvm::cl::init(10u),
+    llvm::cl::cat(catDisc)};
 
 static std::size_t NUM_CELLS;
+static data_t dx, dy, dz;
+void ParseOptions() {
+  if (nh) {
+    // options are not copyable; only copy the value
+    nx = ny = nz = nh.getValue();
+  }
+
+  // metric inference
+  NUM_CELLS = nh ? nh * nh * nh : nx * ny * nz;
+  dx        = (xb - xa) / data_t(nx + 1);
+  dy        = (yb - ya) / data_t(ny + 1);
+  dz        = (zb - za) / data_t(nz + 1);
+  if (!RF)
+    RF = 1 / std::min({dx, dy, dz}, std::less<data_t>{});
+
+  galois::gDebug(nx, " - ", ny, " - ", nz);
+  galois::gDebug(dx, " - ", dy, " - ", dz);
+  galois::gDebug("RF: ", RF);
+}
 
 ///////////////////////////////////////////////////////////////////////////////
 
-constexpr SlnTy INF = std::numeric_limits<SlnTy>::max();
 constexpr galois::MethodFlag no_lockable_flag = galois::MethodFlag::UNPROTECTED;
 
 // TODO: In Galois, we need a graph type with dynamically sized
@@ -194,6 +182,7 @@ struct NodeData {
 };
 auto constexpr atomic_order = std::memory_order_relaxed;
 
+#include "fastmarchingmethod.h"
 #include "unstructured/Mesh.h"
 #include "unstructured/Element.h"
 #include "unstructured/Verifier.h"
@@ -202,8 +191,6 @@ auto constexpr atomic_order = std::memory_order_relaxed;
 // Use atomics for ALL THE THINGS!
 
 ///////////////////////////////////////////////////////////////////////////////
-
-#include "fastmarchingmethod.h"
 
 // TODO analytical boundary
 // static bool NonNegativeRegion(const std::array<CoordTy, 3>& coords) {
@@ -225,12 +212,12 @@ auto constexpr atomic_order = std::memory_order_relaxed;
 //     [&](T node) noexcept {
 //       if (node > NUM_CELLS) return;
 //
-//       if (NonNegativeRegion(getCoord(node))) {
+//       if (NonNegativeRegion(id2xyz(node))) {
 //         for (auto e : graph.edges(node, no_lockable_flag)) {
 //           GNode dst = graph.getEdgeDst(e);
-//           if (!NonNegativeRegion(getCoord(dst))) {
+//           if (!NonNegativeRegion(id2xyz(dst))) {
 // // #ifndef NDEBUG
-// //             auto c = getCoord(node);
+// //             auto c = id2xyz(node);
 // //             galois::gDebug(node, " (", c[0], " ", c[1], " ", c[2], ")");
 // // #endif
 //             boundary.push(node);
@@ -370,9 +357,9 @@ void FirstIteration(Graph& graph, BL& boundary, WL& init_wl,
                               .solution.load(atomic_order);
               double tB = getPointData(ids[(unknown + 1) % 3], no_lockable_flag)
                               .solution.load(atomic_order);
-              [[maybe_unused]] SlnTy old_sln = farPD.solution.load(
+              [[maybe_unused]] data_t old_sln = farPD.solution.load(
                   atomic_order); // hint for heap update only
-              SlnTy sln_temp =
+              data_t sln_temp =
                   CONCURRENT
                       ?
                       // solveQuadratic(graph, dsth, old_sln, farPD.speed) :
@@ -449,7 +436,7 @@ void FastMarching(Graph& graph, WL& wl, PDM& getPointData) {
           // dstData.tag.load(atomic_order) != FAR);
 #ifndef NDEBUG
 //     {
-//       auto [x, y, z] = getCoord(node);
+//       auto [x, y, z] = id2xyz(node);
 //       galois::gDebug("Hi! I'm ", node, " (", x, " ", y, " ", z, " ) with ",
 //       curData.solution); assert(curData.solution != INF);
 //     }
@@ -466,7 +453,7 @@ void FastMarching(Graph& graph, WL& wl, PDM& getPointData) {
 //     }
 //
 //     {
-//       auto [x, y, z] = getCoord(node);
+//       auto [x, y, z] = id2xyz(node);
 //       if (curData.solution - std::sqrt(x * x + y * y + z * z) > max_error)
 //         max_error = curData.solution - std::sqrt(x * x + y * y + z * z);
 //       if (curData.solution - std::sqrt(x * x + y * y + z * z) > 0.2) {
@@ -513,7 +500,7 @@ void FastMarching(Graph& graph, WL& wl, PDM& getPointData) {
           // if (_debug) galois::gDebug("second");
 #ifndef NDEBUG
 //           {
-//             auto [x, y, z] = getCoord(dst);
+//             auto [x, y, z] = id2xyz(dst);
 //             galois::gDebug("Update ", dst, " (", x, " ", y, " ", z, " )");
 //           }
 #endif
@@ -523,9 +510,9 @@ void FastMarching(Graph& graph, WL& wl, PDM& getPointData) {
                           .solution.load(atomic_order);
           double tB = getPointData(ids[(unknown + 1) % 3], no_lockable_flag)
                           .solution.load(atomic_order);
-          SlnTy old_sln [[maybe_unused]] =
+          data_t old_sln [[maybe_unused]] =
               farPD.solution.load(atomic_order); // TODO remove
-          SlnTy sln_temp =
+          data_t sln_temp =
               CONCURRENT
                   ?
                   // solveQuadratic(graph, dsth, old_sln, farPD.speed) :
@@ -700,8 +687,8 @@ void SanityCheck2(Graph& graph, PDM& getPointData) {
 template <typename GNode>
 void _debug_print() {
   for (GNode i = 0; i < NUM_CELLS; i++) {
-    // auto [x, y, z] = getCoord(i);
-    // galois::gDebug(x, " ", y, " ", z, " ", getNodeID({x, y, z}));
+    // auto [x, y, z] = id2xyz(i);
+    // galois::gDebug(x, " ", y, " ", z, " ", xyz2id({x, y, z}));
   }
 }
 
@@ -738,7 +725,7 @@ int main(int argc, char** argv) noexcept {
       galois::graphs::MorphGraph<Element, void, false>; // directional = false
   using GNode         = Graph::GraphNode;
   using BL            = galois::InsertBag<GNode>;
-  using UpdateRequest = std::pair<SlnTy, GNode>;
+  using UpdateRequest = std::pair<data_t, GNode>;
   using HeapTy        = FMMHeapWrapper<
       std::multimap<UpdateRequest::first_type, UpdateRequest::second_type>>;
   using WL = galois::InsertBag<UpdateRequest>;
@@ -807,7 +794,7 @@ int main(int argc, char** argv) noexcept {
   Tmain.start();
 
   switch (algo) {
-  case serial2d:
+  case serial:
     runAlgo<false, HeapTy>(graph, boundary, pdm);
     break;
   case parallel:

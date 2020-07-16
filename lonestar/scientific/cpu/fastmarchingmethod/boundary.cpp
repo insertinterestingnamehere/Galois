@@ -18,21 +18,32 @@
  */
 #include "fastmarchingmethod.h"
 
-template<>
+template <>
 double BoundaryCondition(double2d_t&& coords) {
   [[maybe_unused]] const auto& [x, y] = coords;
 
   return 0.;
 }
 
-template<>
+template <>
+bool NonNegativeRegion(double2d_t&& coords) {
+  [[maybe_unused]] const auto& [x, y] = coords;
+
+  // Example 1: a spherical interface of radius 0.25 centered at the origin
+  // return x * x + y * y >= .25 * .25;
+
+  // Example 2: a plane past through the origin
+  return 100. * x + y >= 0.;
+}
+
+template <>
 double BoundaryCondition(double3d_t&& coords) {
   [[maybe_unused]] const auto& [x, y, z] = coords;
 
   return 0.;
 }
 
-template<>
+template <>
 bool NonNegativeRegion(double3d_t&& coords) {
   [[maybe_unused]] const auto& [x, y, z] = coords;
 

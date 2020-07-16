@@ -1,7 +1,7 @@
 /*
- * This file belongs to the Galois project, a C++ library for exploiting parallelism.
- * The code is being released under the terms of the 3-Clause BSD License (a
- * copy is located in LICENSE.txt at the top-level directory).
+ * This file belongs to the Galois project, a C++ library for exploiting
+ * parallelism. The code is being released under the terms of the 3-Clause BSD
+ * License (a copy is located in LICENSE.txt at the top-level directory).
  *
  * Copyright (C) 2018, The University of Texas at Austin. All rights reserved.
  * UNIVERSITY EXPRESSLY DISCLAIMS ANY AND ALL WARRANTIES CONCERNING THIS
@@ -186,10 +186,10 @@ private:
       assert(r[2] < tuples.size());
       assert(r[3] < tuples.size());
       if constexpr (KEEP_ID) {
-        Element e(tuples[r[1]], tuples[r[2]], tuples[r[3]], r[1], r[2], r[3], ++id);
+        Element e(tuples[r[1]], tuples[r[2]], tuples[r[3]], r[1], r[2], r[3],
+                  ++id);
         elements.push_back(e);
-      }
-      else {
+      } else {
         Element e(tuples[r[1]], tuples[r[2]], tuples[r[3]], ++id);
         elements.push_back(e);
       }
@@ -223,8 +223,7 @@ private:
       if constexpr (KEEP_ID) {
         Element e(tuples[n1], tuples[n2], tuples[n3], n1, n2, n3, ++id);
         elements.push_back(e);
-      }
-      else {
+      } else {
         Element e(tuples[n1], tuples[n2], tuples[n3], ++id);
         elements.push_back(e);
       }
@@ -289,8 +288,7 @@ private:
       if constexpr (KEEP_ID) {
         Element e(tuples[r[1]], tuples[r[2]], r[1], r[2], ++id);
         elements.push_back(e);
-      }
-      else {
+      } else {
         Element e(tuples[r[1]], tuples[r[2]], ++id);
         elements.push_back(e);
       }
@@ -324,8 +322,7 @@ private:
       if constexpr (KEEP_ID) {
         Element e(tuples[n1], tuples[n2], n1, n2, ++id);
         elements.push_back(e);
-      }
-      else {
+      } else {
         Element e(tuples[n1], tuples[n2], ++id);
         elements.push_back(e);
       }
@@ -397,14 +394,16 @@ private:
   template <typename L>
   void createNodes(Graph& g, const L& loop) {
 
-    loop(galois::iterate(elements),
-         [&](const Element& item) {
-           GNode n = g.createNode(item);
-           g.addNode(n);
-         },
-         galois::loopname("allocate"));
+    loop(
+        galois::iterate(elements),
+        [&](const Element& item) {
+          GNode n = g.createNode(item);
+          g.addNode(n);
+        },
+        galois::loopname("allocate"));
   }
-  void makeGraph(Graph& mesh, galois::graphs::read_with_aux_first_graph_tag, bool parallelAllocate) {
+  void makeGraph(Graph& mesh, galois::graphs::read_with_aux_first_graph_tag,
+                 bool parallelAllocate) {
     // std::sort(elements.begin(), elements.end(), centerXCmp());
     divide(elements.begin(), elements.end());
 
@@ -417,11 +416,12 @@ private:
     for (auto ii = mesh.begin(), ee = mesh.end(); ii != ee; ++ii)
       addElement(mesh, *ii, edge_map);
   }
-  void makeGraph(Graph& mesh [[maybe_unused]], galois::graphs::read_default_graph_tag) { // TODO unused for now
+  void
+  makeGraph(Graph& mesh [[maybe_unused]],
+            galois::graphs::read_default_graph_tag) { // TODO unused for now
     galois::graphs::FileGraphWriter temp_graph;
     temp_graph.setNumNodes(elements.size());
     // delay setNumEdges
-    temp_graph.setSizeofEdgeData(0);
 
     temp_graph.phase1();
 
@@ -436,7 +436,7 @@ private:
     //   }
     // }
 
-    // temp_graph.setNumEdges();
+    // temp_graph.setNumEdges<void>();
   }
 
 public:
@@ -449,8 +449,9 @@ public:
   }
 
   template <typename Graph> //<! MorphGraph
-  size_t readDispatch(Graph& mesh, galois::graphs::read_with_aux_first_graph_tag tag,
-                    std::string basename, bool parallelAllocate) {
+  size_t readDispatch(Graph& mesh,
+                      galois::graphs::read_with_aux_first_graph_tag tag,
+                      std::string basename, bool parallelAllocate) {
     std::vector<Tuple> tuples;
     readNodes(basename, tuples);
     readElements<true>(basename, tuples);

@@ -55,12 +55,12 @@ void global_config() {
 
 #include "structured/grids.h"
 
-// generate_grid<void>(nx, ny, nz);
+// ConstructCsrGrids<void>(nx, ny, nz);
 int main(int argc, char** argv) noexcept {
   galois::SharedMemSys galois_system;
   LonestarStart(argc, argv, name, desc, url, nullptr);
 
   global_config();
-  generate_grid<void>(filename, nx, ny, nz);
+  ConstructCsrGrids<void>(filename, nx, ny, nz);
   return 0;
 }
