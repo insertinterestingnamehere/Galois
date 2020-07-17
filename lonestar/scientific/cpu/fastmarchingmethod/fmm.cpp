@@ -371,9 +371,9 @@ double solveQuadratic(Graph& graph, GNode node, double sln,
     }
     std::advance(dir, 2);
   }
-  galois::gDebug("solveQuadratic: ", sln_delta[0].second, " ",
+  /*galois::gDebug("solveQuadratic: ", sln_delta[0].second, " ",
                  sln_delta[1].second, " ", sln_delta[2].second,
-                 " #non_zero: ", non_zero_counter);
+                 " #non_zero: ", non_zero_counter);*/
   if (non_zero_counter == 0)
     return INF;
   while (non_zero_counter) {
