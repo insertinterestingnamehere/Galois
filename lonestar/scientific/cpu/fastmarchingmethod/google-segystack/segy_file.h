@@ -176,8 +176,6 @@ protected:
   std::uint64_t cur_offset_;
 };
 
-} // namespace segystack
-
 std::ostream& operator<<(std::ostream& os,
                          const segystack::SegyFile::TextHeader& hdr);
 
@@ -186,5 +184,7 @@ std::ostream& operator<<(std::ostream& os,
 
 std::ostream& operator<<(std::ostream& os,
                          const segystack::SegyFile::Trace::Header& hdr);
+
+} // namespace segystack
 
 #endif // SEGYSTACK_SEGY_H_
