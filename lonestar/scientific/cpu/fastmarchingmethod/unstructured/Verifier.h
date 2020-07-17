@@ -1,7 +1,7 @@
 /*
- * This file belongs to the Galois project, a C++ library for exploiting parallelism.
- * The code is being released under the terms of the 3-Clause BSD License (a
- * copy is located in LICENSE.txt at the top-level directory).
+ * This file belongs to the Galois project, a C++ library for exploiting
+ * parallelism. The code is being released under the terms of the 3-Clause BSD
+ * License (a copy is located in LICENSE.txt at the top-level directory).
  *
  * Copyright (C) 2018, The University of Texas at Austin. All rights reserved.
  * UNIVERSITY EXPRESSLY DISCLAIMS ANY AND ALL WARRANTIES CONCERNING THIS
@@ -65,7 +65,7 @@ class Verifier {
       Element& e1 = graph.getData(node);
 
       for (typename Graph::edge_iterator jj = graph.edge_begin(node),
-                                ej = graph.edge_end(node);
+                                         ej = graph.edge_end(node);
            jj != ej; ++jj) {
         const GNode& n = graph.getEdgeDst(jj);
         Element& e2    = graph.getData(n);
@@ -130,7 +130,7 @@ class Verifier {
         found.insert(node);
         int i = 0;
         for (typename Graph::edge_iterator ii = graph.edge_begin(node),
-                                  ei = graph.edge_end(node);
+                                           ei = graph.edge_end(node);
              ii != ei; ++ii) {
           GNode n = graph.getEdgeDst(ii);
           assert(i < 3);

@@ -556,9 +556,10 @@ void FastMarching(Graph& graph, WL& wl) {
   [[maybe_unused]] double max_error = 0;
   std::size_t num_iterations        = 0;
 
-  auto PushOp = [&]<typename ItemTy, typename UC>(const ItemTy& item, UC& wl) {
+  auto PushOp = [&](const auto& item, auto& wl) {
     // TODO gcc/9.2
     // auto [_old_sln, node] = item;
+    using ItemTy = std::remove_cv_t<std::remove_reference_t<decltype(item)>>;
     typename ItemTy::second_type node;
     std::tie(std::ignore, node) = item;
     assert(node < NUM_CELLS && "Ghost Point!");

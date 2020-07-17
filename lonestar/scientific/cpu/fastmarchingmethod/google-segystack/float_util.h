@@ -25,7 +25,7 @@ namespace segystack {
 template <typename T>
 T swap_endianness(T value) {
   const int num_bytes = sizeof(T);
-  char* bytes = reinterpret_cast<char*>(&value);
+  char* bytes         = reinterpret_cast<char*>(&value);
 
   for (int i = 0; i < num_bytes / 2; i++) {
     std::swap(bytes[i], bytes[num_bytes - 1 - i]);
@@ -46,6 +46,6 @@ T fix_endianness_if_needed(T value) {
 // IEEE: https://en.wikipedia.org/wiki/IEEE_754-1985
 float ibm_to_ieee(float value, bool is_big_endian_input = true);
 
-}  // namespace segystack
+} // namespace segystack
 
 #endif

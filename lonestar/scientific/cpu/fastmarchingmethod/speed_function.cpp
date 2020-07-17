@@ -18,7 +18,7 @@
  */
 #include "fastmarchingmethod.h"
 
-template<>
+template <>
 double SpeedFunction(double2d_t&& coords) {
   [[maybe_unused]] const auto& [x, y] = coords;
 
@@ -27,11 +27,12 @@ double SpeedFunction(double2d_t&& coords) {
   // return 1. - .99 * std::sin(2. * PI * x) * std::sin(2. * PI * y);
 }
 
-template<>
+template <>
 double SpeedFunction(double3d_t&& coords) {
   [[maybe_unused]] const auto& [x, y, z] = coords;
 
   return 1.;
-  // return 1. + .50 * std::sin(20. * PI * x) * std::sin(20. * PI * y) * std::sin(20. * PI * z);
-  // return 1. - .99 * std::sin(2. * PI * x) * std::sin(2. * PI * y) * std::sin(2. * PI * z);
+  // return 1. + .50 * std::sin(20. * PI * x) * std::sin(20. * PI * y) *
+  // std::sin(20. * PI * z); return 1. - .99 * std::sin(2. * PI * x) *
+  // std::sin(2. * PI * y) * std::sin(2. * PI * z);
 }

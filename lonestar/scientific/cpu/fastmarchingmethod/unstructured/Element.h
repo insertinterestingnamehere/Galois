@@ -1,7 +1,7 @@
 /*
- * This file belongs to the Galois project, a C++ library for exploiting parallelism.
- * The code is being released under the terms of the 3-Clause BSD License (a
- * copy is located in LICENSE.txt at the top-level directory).
+ * This file belongs to the Galois project, a C++ library for exploiting
+ * parallelism. The code is being released under the terms of the 3-Clause BSD
+ * License (a copy is located in LICENSE.txt at the top-level directory).
  *
  * Copyright (C) 2018, The University of Texas at Austin. All rights reserved.
  * UNIVERSITY EXPRESSLY DISCLAIMS ANY AND ALL WARRANTIES CONCERNING THIS
@@ -80,25 +80,24 @@ public:
   }
 
   //! FMM - Constructor for Triangles
-  Element(const Tuple& a, const Tuple& b, const Tuple& c,
-          const size_t aid, const size_t bid, const size_t cid,
-          int _id = 0)
+  Element(const Tuple& a, const Tuple& b, const Tuple& c, const size_t aid,
+          const size_t bid, const size_t cid, int _id = 0)
       : obtuse(0), bDim(true), id(_id) {
     coords[0] = a;
     coords[1] = b;
     coords[2] = c;
-    ids = { aid, bid, cid };
+    ids       = {aid, bid, cid};
     if (b < a || c < a) {
       if (b < c) {
         coords[0] = b;
         coords[1] = c;
         coords[2] = a;
-        ids = { bid, cid, aid };
+        ids       = {bid, cid, aid};
       } else {
         coords[0] = c;
         coords[1] = a;
         coords[2] = b;
-        ids = { cid, aid, bid };
+        ids       = {cid, aid, bid};
       }
     }
     //    edges[0] = Edge(coords[0], coords[1]);
@@ -111,17 +110,16 @@ public:
   }
 
   //! FMM - Constructor for segments
-  Element(const Tuple& a, const Tuple& b,
-          const size_t aid, const size_t bid,
+  Element(const Tuple& a, const Tuple& b, const size_t aid, const size_t bid,
           int _id = 0)
       : obtuse(0), bDim(false), id(_id) {
     coords[0] = a;
     coords[1] = b;
-    ids = { aid, bid };
+    ids       = {aid, bid};
     if (b < a) {
       coords[0] = b;
       coords[1] = a;
-      ids = { bid, aid };
+      ids       = {bid, aid};
     }
     // computeCenter();
   }
@@ -187,15 +185,15 @@ public:
   bool inTriangle(const Tuple& p) const {
     if (!bDim)
       return false;
-  
+
     const Tuple& p1 = coords[0];
     const Tuple& p2 = coords[1];
     const Tuple& p3 = coords[2];
-  
+
     if ((p1 == p) || (p2 == p) || (p3 == p)) {
       return false;
     }
-  
+
     int count  = 0;
     double px  = p.x();
     double py  = p.y();
@@ -205,7 +203,7 @@ public:
     double p2y = p2.y();
     double p3x = p3.x();
     double p3y = p3.y();
-  
+
     if (p2x < p1x) {
       if ((p2x < px) && (p1x >= px)) {
         if (((py - p2y) * (p1x - p2x)) < ((px - p2x) * (p1y - p2y))) {
@@ -219,7 +217,7 @@ public:
         }
       }
     }
-  
+
     if (p3x < p2x) {
       if ((p3x < px) && (p2x >= px)) {
         if (((py - p3y) * (p2x - p3x)) < ((px - p3x) * (p2y - p3y))) {
@@ -239,7 +237,7 @@ public:
         }
       }
     }
-  
+
     if (p1x < p3x) {
       if ((p1x < px) && (p3x >= px)) {
         if (((py - p1y) * (p3x - p1x)) < ((px - p1x) * (p3y - p1y))) {
@@ -259,7 +257,7 @@ public:
         }
       }
     }
-  
+
     return count == 1;
   }
 

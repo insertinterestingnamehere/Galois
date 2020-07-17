@@ -31,9 +31,9 @@ namespace segystack {
 class StackFile {
   class GridMap;
 
- public:
+public:
   class Grid {
-   public:
+  public:
     enum Units { METERS = 0, FEET = 1 };
 
     Grid();
@@ -114,7 +114,7 @@ class StackFile {
 
     BoundingBox boundingBox() const;
 
-   protected:
+  protected:
     friend class StackFile;
     friend std::ostream& operator<<(std::ostream& os,
                                     const segystack::StackFile::Grid& grid);
@@ -127,7 +127,7 @@ class StackFile {
   };
 
   class SegyOptions {
-   public:
+  public:
     SegyOptions();
 
     void setUtmZone(int num, char zone);
@@ -145,7 +145,7 @@ class StackFile {
     bool is2D() const { return is_2d_; }
     void setIs2D(bool value) { is_2d_ = value; }
 
-   private:
+  private:
     UTMZone utm_zone_;
     std::map<SegyFile::Trace::Header::Attribute, int> offsets_;
     bool is_2d_;
@@ -155,8 +155,7 @@ class StackFile {
 
   explicit StackFile(const std::string& filename, const SegyFile& segyfile);
 
-  explicit StackFile(const std::string& filename,
-                     const SegyFile& segyfile,
+  explicit StackFile(const std::string& filename, const SegyFile& segyfile,
                      const SegyOptions& opts);
 
   explicit StackFile(const SegyFile& segyfile, const SegyOptions& opts);
@@ -165,29 +164,20 @@ class StackFile {
 
   const Grid& grid() const;
 
-  void readInline(int il,
-                  std::vector<float>& data,
+  void readInline(int il, std::vector<float>& data,
                   float fill_value = 0.0f) const;
-  void readInline(int il,
-                  float* buffer,
-                  size_t buffer_size,
+  void readInline(int il, float* buffer, size_t buffer_size,
                   float fill_value = 0.0f) const;
 
-  void readCrossline(int xl,
-                     std::vector<float>& data,
+  void readCrossline(int xl, std::vector<float>& data,
                      float fill_value = 0.0f) const;
-  void readCrossline(int xl,
-                     float* buffer,
-                     size_t buffer_size,
+  void readCrossline(int xl, float* buffer, size_t buffer_size,
                      float fill_value = 0.0f) const;
 
-  void readDepthSlice(unsigned int sample_index,
-                      std::vector<float>& data,
+  void readDepthSlice(unsigned int sample_index, std::vector<float>& data,
                       float fill_value = 0.0f) const;
-  void readDepthSlice(unsigned int sample_index,
-                      float* buffer,
-                      size_t buffer_size,
-                      float fill_value = 0.0f) const;
+  void readDepthSlice(unsigned int sample_index, float* buffer,
+                      size_t buffer_size, float fill_value = 0.0f) const;
 
   bool isOptimizedForCrosslineAccess() const {
     return data_xl_file_ == nullptr;
@@ -201,29 +191,25 @@ class StackFile {
 
   ~StackFile();
 
- private:
-  void createFromSegy(const std::string& filename,
-                      const SegyFile& segyfile,
+private:
+  void createFromSegy(const std::string& filename, const SegyFile& segyfile,
                       const SegyOptions& opts);
   void initialize();
   void computeInlineMetadata(internal::StackHeader::SliceMetadata* il_metadata);
-  void computeCrosslineMetadata(
-      internal::StackHeader::SliceMetadata* xl_metadata);
+  void
+  computeCrosslineMetadata(internal::StackHeader::SliceMetadata* xl_metadata);
   void computeDepthSliceMetadata(
       internal::StackHeader::SliceMetadata* depth_metadata);
   void writeCrosslineSlices();
 
   void readCrosslineOptimized(int xl, float* buffer, size_t buffer_size) const;
-  void readCrosslineFromInlineData(int xl,
-                                   float* buffer,
+  void readCrosslineFromInlineData(int xl, float* buffer,
                                    size_t buffer_size) const;
 
   void writeDepthSlices();
-  void readDepthSliceOptimized(unsigned int sample_index,
-                               float* buffer,
+  void readDepthSliceOptimized(unsigned int sample_index, float* buffer,
                                size_t buffer_size) const;
-  void readDepthSliceFromInlineData(unsigned int sample_index,
-                                    float* buffer,
+  void readDepthSliceFromInlineData(unsigned int sample_index, float* buffer,
                                     size_t buffer_size) const;
 
   std::string filename_;
@@ -242,6 +228,6 @@ std::ostream& operator<<(std::ostream& os,
                          const StackFile::Grid::Coordinate& coord);
 std::ostream& operator<<(std::ostream& os, const StackFile::SegyOptions& opts);
 
-}  // namespace segystack
+} // namespace segystack
 
-#endif  // SEGYSTACK_STACK_FILE_H_
+#endif // SEGYSTACK_STACK_FILE_H_

@@ -462,7 +462,7 @@ public:
 
   template <typename Graph> //<! LC_CSR_Graph
   void readDispatch(Graph& graph, galois::graphs::read_default_graph_tag tag,
-                    std::string basename, bool parallelAllocate) {
+                    std::string basename, bool) {
     std::vector<Tuple> tuples;
     readNodes(basename, tuples);
     readElements<true>(basename, tuples);

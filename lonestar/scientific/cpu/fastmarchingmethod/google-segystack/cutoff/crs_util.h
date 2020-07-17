@@ -25,8 +25,8 @@
 namespace segystack {
 
 class UTMZone {
- public:
-  UTMZone(int zone_num = 32, char zone_char = 'U');  // default UTM Zone.
+public:
+  UTMZone(int zone_num = 32, char zone_char = 'U'); // default UTM Zone.
 
   std::pair<int, char> value() const;
   void setValue(int zone_num, char zone_char);
@@ -37,7 +37,7 @@ class UTMZone {
   char letter() const;
   void setLetter(char zone_char);
 
- private:
+private:
   int zone_num_;
   char zone_char_;
 };
@@ -48,20 +48,21 @@ struct GeographicCoordinates {
 };
 
 class UTMZoneConverter {
- public:
+public:
   UTMZoneConverter(const UTMZone& utm_zone);
 
   GeographicCoordinates getGeographicCoordinates(float easting,
                                                  float northing) const;
 
   ~UTMZoneConverter();
- private:
+
+private:
   class Impl;
   std::unique_ptr<Impl> impl_;
 };
 
 std::ostream& operator<<(std::ostream& os, const UTMZone& utm);
 
-}  // namespace segystack
+} // namespace segystack
 
 #endif

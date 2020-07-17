@@ -24,7 +24,7 @@
 namespace segystack {
 
 class MmapFile {
- public:
+public:
   typedef std::ios_base::openmode OpenMode;
 
   static std::unique_ptr<MmapFile> Create(const std::string& filename) {
@@ -79,7 +79,7 @@ class MmapFile {
     return ptr - reinterpret_cast<char*>(addr_);
   }
 
- protected:
+protected:
   MmapFile(const MmapFile&) = delete;
   MmapFile& operator=(const MmapFile&) = delete;
 
@@ -92,6 +92,6 @@ class MmapFile {
   void* addr_;
 };
 
-}  // namespace segystack
+} // namespace segystack
 
-#endif  // SEGYSTACK_MMAPFILE_H_
+#endif // SEGYSTACK_MMAPFILE_H_

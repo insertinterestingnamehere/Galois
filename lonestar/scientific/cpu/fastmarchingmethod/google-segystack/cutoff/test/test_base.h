@@ -25,19 +25,11 @@ namespace segystack {
 namespace test {
 
 void create_test_segy(
-    const std::string& outfile,
-    int num_samples,
-    int sampling_interval,
-    int num_il,
-    int il_increment,
-    int num_xl,
-    int xl_increment,
-    float x_origin,
-    float y_origin,
-    float il_spacing,
-    float xl_spacing,
+    const std::string& outfile, int num_samples, int sampling_interval,
+    int num_il, int il_increment, int num_xl, int xl_increment, float x_origin,
+    float y_origin, float il_spacing, float xl_spacing,
     const StackFile::SegyOptions& opts = StackFile::SegyOptions());
 }
-}  // namespace segystack
+} // namespace segystack
 
 #endif

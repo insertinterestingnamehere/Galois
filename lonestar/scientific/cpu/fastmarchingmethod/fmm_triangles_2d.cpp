@@ -402,8 +402,7 @@ void FirstIteration(Graph& graph, BL& boundary, WL& init_wl,
 
 // TODO
 template <typename RangeFunc, typename FunctionTy, typename... Args>
-void while_wrapper(const RangeFunc& rangeMaker, FunctionTy&& fn,
-                   const Args&... args) {
+void while_wrapper(const RangeFunc&, FunctionTy&&, const Args&... args) {
   auto tpl = std::make_tuple(args...);
   // runtime::for_each_gen(rangeMaker(tpl), std::forward<FunctionTy>(fn), tpl);
 }
@@ -421,7 +420,8 @@ void FastMarching(Graph& graph, WL& wl, PDM& getPointData) {
   [[maybe_unused]] double max_error = 0;
   std::size_t num_iterations        = 0;
 
-  auto PushOp = [&]<typename ItemTy, typename UC>(const ItemTy& item, UC& wl) {
+  auto PushOp = [&](auto const& item, auto& wl) {
+    using ItemTy = std::remove_cv_t<std::remove_reference_t<decltype(item)>>;
     galois::gDebug("new item");
     auto [_old_sln, node] = item;
     auto& curData = graph.getData(node, galois::MethodFlag::UNPROTECTED);

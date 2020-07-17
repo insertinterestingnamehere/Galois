@@ -12,6 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#if defined(__GNUC__)
+_Pragma("GCC diagnostic ignored \"-Wunused-const-variable\"")
+#endif
+
 #include "segy_file.h"
 
 #include <algorithm>
@@ -23,6 +27,8 @@
 
 // #include "logging.h"
 #include "galois/gIO.h"
+
+namespace segystack {
 
 std::ostream& operator<<(std::ostream& os,
                          const segystack::SegyFile::TextHeader& hdr) {
@@ -41,8 +47,6 @@ std::ostream& operator<<(std::ostream& os,
   hdr.print(os);
   return os;
 }
-
-namespace segystack {
 
 namespace {
 
