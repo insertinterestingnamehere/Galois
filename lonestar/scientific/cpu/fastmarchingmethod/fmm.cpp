@@ -302,9 +302,9 @@ void initBoundary(Graph& graph, BL& boundary) {
 ////////////////////////////////////////////////////////////////////////////////
 // Solver
 
-template <typename Graph, typename GNode = typename Graph::GraphNode>
-auto checkDirection(Graph& graph, GNode node, double center_sln,
-                    typename Graph::edge_iterator dir) {
+template <typename Graph, typename GNode = typename Graph::GraphNode,
+          typename It = typename Graph::edge_iterator>
+auto checkDirection(Graph& graph, GNode node, data_t center_sln, It dir) {
 #ifndef NDEBUG
   if (dir >= graph.edge_end(node, no_lockable_flag)) {
     galois::gDebug(node, " ",
@@ -320,28 +320,24 @@ auto checkDirection(Graph& graph, GNode node, double center_sln,
   data_t sln   = center_sln;
   GNode upwind = node;
 
-  // check one neighbor
-  GNode neighbor   = graph.getEdgeDst(dir);
-  auto& first_data = graph.getData(neighbor, no_lockable_flag);
-  galois::gDebug("Check neighbor ", neighbor, (int)first_data.tag);
-  // if (first_data.tag == KNOWN)
-  if (first_data.solution < sln) {
-    sln    = first_data.solution;
-    upwind = neighbor;
-  }
-
-  // check the other neighbor
-  std::advance(dir, 1); // opposite direction of the same dimension
-  if (dir != graph.edge_end(node, no_lockable_flag)) {
-    neighbor          = graph.getEdgeDst(dir);
-    auto& second_data = graph.getData(neighbor, no_lockable_flag);
-    galois::gDebug("Check neighbor ", neighbor, (int)second_data.tag);
-    // if (second_data.tag == KNOWN)
-    if (second_data.solution < sln) {
-      sln    = second_data.solution;
+  auto FindUpwind = [&](It ei) {
+    GNode neighbor = graph.getEdgeDst(ei);
+    auto& n_data   = graph.getData(neighbor, no_lockable_flag);
+    galois::gDebug("Check neighbor ", neighbor, (int)n_data.tag);
+    if (data_t n_sln = n_data.solution.load(std::memory_order_relaxed);
+        n_sln < sln) {
+      sln    = n_sln;
       upwind = neighbor;
     }
-  }
+  };
+
+  // check one neighbor
+  FindUpwind(dir);
+  std::advance(dir, 1); // opposite direction of the same dimension
+  assert(dir < graph.edge_end(node, no_lockable_flag) &&
+         "Ill-formed uni-directional dimension");
+  // check the other neighbor
+  FindUpwind(dir);
 
   if (upwind == node)
     return std::make_pair(0., 0.);
@@ -349,18 +345,19 @@ auto checkDirection(Graph& graph, GNode node, double center_sln,
 }
 
 template <typename Graph, typename GNode = typename Graph::GraphNode>
-double solveQuadratic(Graph& graph, GNode node, double sln,
-                      const double speed) {
-  // TODO oarameterize dimension 3
-  std::array<std::pair<double, double>, 2> sln_delta{std::make_pair(0., dx),
-                                                     std::make_pair(0., dy)};
+double solveQuadratic(Graph& graph, GNode node, data_t sln,
+                      const data_t speed) {
+  // TODO parameterize dimension 3
+  std::array<std::pair<data_t, data_t>, DIM_LIMIT> sln_delta{
+      std::make_pair(0., dx), std::make_pair(0., dy)};
+
   int non_zero_counter = 0;
   auto dir             = graph.edge_begin(node, no_lockable_flag);
-  for (auto& p : sln_delta) {
-    if (dir == graph.edge_end(node, no_lockable_flag))
-      break;
-    double& s     = p.first;
-    double& d     = p.second;
+  for (auto& [s, d] : sln_delta) {
+#ifdef NDEBUG
+    if (dir >= graph.edge_end(node, no_lockable_flag))
+      GALOIS_DIE("Dimension exceeded");
+#endif
     auto [si, di] = checkDirection(graph, node, sln, dir);
     if (di) {
       s = si;
@@ -493,31 +490,35 @@ void FirstIteration(Graph& graph, BL& boundary, WL& init_wl) {
       [&](BT node) noexcept {
         for (auto e : graph.edges(node, no_lockable_flag)) {
           GNode dst = graph.getEdgeDst(e);
-          if (dst < NUM_CELLS) {
-            auto& dstData = graph.getData(dst, no_lockable_flag);
-            assert(!dstData.is_ghost);
-            if (dstData.tag != KNOWN) {
-              assert(dstData.solution.load(atomic_order) == INF ||
-                     dstData.tag.load(atomic_order) != FAR);
-              data_t old_sln = dstData.solution.load(atomic_order);
-              data_t sln_temp =
-                  CONCURRENT
-                      ? solveQuadratic(graph, dst, old_sln, dstData.speed)
-                      : SerialSolveQuadratic(graph, dst, old_sln,
-                                             dstData.speed);
-              if (old_sln == INF)
-                assert(sln_temp != INF);
-              if (sln_temp < galois::atomicMin(dstData.solution, sln_temp)) {
-                galois::gDebug("Hi! I'm ", dst, " I got ", sln_temp);
-                if (auto old_tag = dstData.tag.load(atomic_order);
-                    old_tag != BAND) {
-                  while (!dstData.tag.compare_exchange_weak(
-                      old_tag, BAND, std::memory_order_relaxed))
-                    ;
-                  if constexpr (CONCURRENT)
-                    init_wl.push(WT{sln_temp, dst});
-                  else
-                    init_wl.push(WT{sln_temp, dst}, old_sln);
+
+          if (dst >= NUM_CELLS)
+            continue;
+          auto& dstData = graph.getData(dst, no_lockable_flag);
+          // assert(!dstData.is_ghost);
+
+          // if (dstData.tag == KNOWN)
+          //   continue;
+          // assert(dstData.solution.load(atomic_order) == INF ||
+          //        dstData.tag.load(atomic_order) == BAND);
+
+          data_t old_sln = dstData.solution.load(atomic_order);
+          data_t sln_temp =
+              CONCURRENT
+                  ? solveQuadratic(graph, dst, old_sln, dstData.speed)
+                  : SerialSolveQuadratic(graph, dst, old_sln, dstData.speed);
+          if (old_sln == INF)
+            assert(sln_temp != INF);
+          if (sln_temp < galois::atomicMin(dstData.solution, sln_temp)) {
+            galois::gDebug("Hi! I'm ", dst, " I got ", sln_temp);
+            if (auto old_tag = dstData.tag.load(atomic_order);
+                old_tag != BAND) {
+              while (!dstData.tag.compare_exchange_weak(
+                  old_tag, BAND, std::memory_order_relaxed))
+                ;
+              if constexpr (CONCURRENT)
+                init_wl.push(WT{sln_temp, dst});
+              else
+                init_wl.push(WT{sln_temp, dst}, old_sln);
 #ifndef NDEBUG
 //                 } else {
 //                   if constexpr (CONCURRENT) {
@@ -531,8 +532,6 @@ void FirstIteration(Graph& graph, BL& boundary, WL& init_wl) {
 //                     assert(in_wl);
 //                   }
 #endif
-                }
-              }
             }
           }
         }
@@ -610,51 +609,51 @@ void FastMarching(Graph& graph, WL& wl) {
     // UpdateNeighbors
     for (auto e : graph.edges(node, no_lockable_flag)) {
       GNode dst = graph.getEdgeDst(e);
-      if (dst < NUM_CELLS) {
-        auto& dstData = graph.getData(dst, no_lockable_flag);
-        assert(!dstData.is_ghost);
-        // chaotic execution: KNOWN neighbor doesn't suffice with smaller value
-        //   reason: circle-back update
-        //   ... but it holds with ordered serial execution
-        // smaller value doesn't suffice to be KNOWN - by-pass to be active
-        if (dstData.solution > curData.solution) {
+      if (dst >= NUM_CELLS)
+        continue;
+      auto& dstData = graph.getData(dst, no_lockable_flag);
+      assert(!dstData.is_ghost);
+      // chaotic execution: KNOWN neighbor doesn't suffice with smaller value
+      //   reason: circle-back update
+      //   ... but it holds with ordered serial execution
+      // smaller value doesn't suffice to be KNOWN - by-pass to be active
+      if (dstData.solution > curData.solution) {
 #ifndef NDEBUG
-          {
-            auto [x, y] = id2xy(dst);
-            galois::gDebug("Update ", dst, " (", x, " ", y, ")");
-          }
+        {
+          auto [x, y] = id2xy(dst);
+          galois::gDebug("Update ", dst, " (", x, " ", y, ")");
+        }
 #endif
-          // assert(dstData.solution == INF && dstData.tag == FAR);
-          galois::gDebug("tag ", dstData.tag, ", sln ", dstData.solution);
-          data_t old_sln = dstData.solution.load(atomic_order);
-          // assert(old_sln > curData.solution); // not necessarily due to
-          // atomics
-          double sln_temp =
-              CONCURRENT
-                  ? solveQuadratic(graph, dst, old_sln, dstData.speed)
-                  : SerialSolveQuadratic(graph, dst, old_sln, dstData.speed);
-          if (sln_temp < galois::atomicMin(dstData.solution, sln_temp)) {
-            // galois::atomicMin(dstData.solution, sln_temp); // TODO safe to
-            // remove?
-            auto old_tag = dstData.tag.load(atomic_order);
-            if constexpr (CONCURRENT) {
-              if (old_tag != BAND) {
-                while (!dstData.tag.compare_exchange_weak(
-                    old_tag, BAND, std::memory_order_relaxed))
-                  ;
-                wl.push(ItemTy{sln_temp, dst});
-              }
-            } else {
-              while (old_tag != BAND &&
-                     !dstData.tag.compare_exchange_weak(
-                         old_tag, BAND, std::memory_order_relaxed))
-                ;
-              wl.push(ItemTy{sln_temp, dst}, old_sln);
-            }
+        // assert(dstData.solution == INF && dstData.tag == FAR);
+        galois::gDebug("tag ", dstData.tag, ", sln ", dstData.solution);
+        data_t old_sln = dstData.solution.load(atomic_order);
+        // assert(old_sln > curData.solution); // not necessarily due to
+        // atomics
+        double sln_temp =
+            CONCURRENT
+                ? solveQuadratic(graph, dst, old_sln, dstData.speed)
+                : SerialSolveQuadratic(graph, dst, old_sln, dstData.speed);
+        if (sln_temp < galois::atomicMin(dstData.solution, sln_temp)) {
+          // galois::atomicMin(dstData.solution, sln_temp); // TODO safe to
+          // remove?
+          auto old_tag = dstData.tag.load(atomic_order);
+          if constexpr (CONCURRENT) {
+            // if (old_tag != BAND) {
+            while (!dstData.tag.compare_exchange_weak(
+                old_tag, BAND, std::memory_order_relaxed))
+              ;
+            wl.push(ItemTy{sln_temp, dst});
+            //}
           } else {
-            galois::gDebug(dst, " solution not updated: ", sln_temp,
-                           " (currently ", dstData.solution, ")");
+            while (old_tag != BAND &&
+                   !dstData.tag.compare_exchange_weak(
+                       old_tag, BAND, std::memory_order_relaxed))
+              ;
+            wl.push(ItemTy{sln_temp, dst}, old_sln);
           }
+        } else {
+          galois::gDebug(dst, " solution not updated: ", sln_temp,
+                         " (currently ", dstData.solution, ")");
         }
       }
     }
@@ -772,7 +771,8 @@ void SanityCheck(Graph& graph) {
           val += std::pow(std::max(0., std::max(s1, s2)), 2);
           std::advance(dir, 1);
         }
-        data_t error = std::sqrt(val) * curData.speed - 1.;
+        data_t error =
+            (std::sqrt(val) - (1. / curData.speed)) / (1. / curData.speed);
         max_error.update(error);
         if (error > tolerance) {
           auto [x, y] = id2xy(node);
