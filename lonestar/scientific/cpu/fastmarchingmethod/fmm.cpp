@@ -47,7 +47,9 @@
 
 #include "Lonestar/BoilerPlate.h"
 
+#ifdef GALOIS_ENABLE_VTUNE
 #include "galois/runtime/Profile.h"
+#endif
 
 static char const* name = "Fast Marching Method";
 static char const* desc =
@@ -55,7 +57,7 @@ static char const* desc =
     "(https://en.wikipedia.org/wiki/Fast_marching_method)";
 static char const* url = "";
 
-#define DIM_LIMIT 2 // support 2-D
+#define DIM_LIMIT 2 // 2-D specific
 using data_t         = double;
 constexpr data_t INF = std::numeric_limits<data_t>::max();
 
@@ -114,10 +116,27 @@ static llvm::cl::opt<std::string>
                llvm::cl::init(""), llvm::cl::cat(catOutput));
 
 static llvm::cl::OptionCategory catDisc("4. Discretization options");
+namespace internal {
+template <typename T>
+struct StrConv;
+template <>
+struct StrConv<std::size_t> {
+  auto operator()(const char* str, char** endptr, int base) {
+    return strtoul(str, endptr, base);
+  }
+};
+template <>
+struct StrConv<double> {
+  auto operator()(const char* str, char** endptr, int) {
+    return strtod(str, endptr);
+  }
+};
+} // namespace internal
 template <typename NumTy, int MAX_SIZE = 0>
 struct NumVecParser : public llvm::cl::parser<std::vector<NumTy>> {
   template <typename... Args>
   NumVecParser(Args&... args) : llvm::cl::parser<std::vector<NumTy>>(args...) {}
+  internal::StrConv<NumTy> strconv;
   // parse - Return true on error.
   bool parse(llvm::cl::Option& O, llvm::StringRef ArgName,
              const std::string& ArgValue, std::vector<NumTy>& Val) {
@@ -125,7 +144,7 @@ struct NumVecParser : public llvm::cl::parser<std::vector<NumTy>> {
     char* end;
 
     do {
-      std::size_t d = strtoul(Val.empty() ? beg : end + 1, &end, 0);
+      NumTy d = strconv(Val.empty() ? beg : end + 1, &end, 0);
       if (!d)
         return O.error("Invalid option value '" + ArgName + "=" + ArgValue +
                        "': should be comma-separated unsigned integers");
@@ -147,6 +166,13 @@ static llvm::cl::opt<std::vector<std::size_t>, false,
          llvm::cl::desc("Size of each dimensions as a comma-separated array "
                         "(support up to 2-D)"),
          llvm::cl::cat(catDisc));
+static llvm::cl::opt<std::vector<double>, false,
+                     NumVecParser<double, DIM_LIMIT>>
+    intervals(
+        "dx", llvm::cl::value_desc("dx,dy"),
+        llvm::cl::desc("Interval of each dimensions as a comma-separated array "
+                       "(support up to 2-D)"),
+        llvm::cl::init(std::vector<double>{1., 1.}), llvm::cl::cat(catDisc));
 
 static uint64_t nx, ny;
 static std::size_t NUM_CELLS;
@@ -194,16 +220,7 @@ static_assert(std::is_trivial_v<std::atomic<std::size_t>> &&
 //            BAND_OLD, BAND_NEW, FAR };
 enum Tag { KNOWN, BAND, FAR };
 
-struct NonAtomicNodeData {
-  bool is_ghost;
-  Tag tag;
-  double speed;
-  double solution;
-};
-
 struct NodeData {
-  bool is_ghost; // read only
-  std::atomic<Tag> tag;
   double speed; // read only
   std::atomic<double> solution;
 };
@@ -231,9 +248,23 @@ using WL = galois::InsertBag<UpdateRequest>;
 #include "numpy/cnpy.h"
 #include "util/output.hh"
 
+struct PushWrap {
+  template <typename C, typename T = typename C::value_type>
+  void operator()(C& cont, T&& item) {
+    cont.push(std::forward<T>(item));
+  }
+
+  template <typename C, typename T = typename C::value_type,
+            typename K = typename C::key_type>
+  void operator()(C& cont, T&& item, K& hint) {
+    cont.push(std::forward<T>(item), hint);
+  }
+};
+
 class Solver {
   Graph graph;
   BL boundary;
+  PushWrap pushWrap;
   galois::substrate::PerThreadStorage<
       std::array<std::pair<data_t, data_t>, DIM_LIMIT>>
       local_pairs;
@@ -245,8 +276,17 @@ class Solver {
 
     // metric inference
     NUM_CELLS = nx * ny;
-    dx        = (xb - xa) / data_t(nx + 1);
-    dy        = (yb - ya) / data_t(ny + 1);
+    if (intervals.empty()) {
+      dx = (xb - xa) / data_t(nx + 1);
+      dy = (yb - ya) / data_t(ny + 1);
+    } else {
+      dx = intervals[0];
+      dy = intervals[1];
+      xa = -dx;
+      xb = dx * data_t(nx);
+      ya = -dy;
+      yb = dy * data_t(ny);
+    }
 
     if (!RF)
       RF = 1 / std::min({dx, dy, 1.}, std::less<data_t>{});
@@ -256,64 +296,47 @@ class Solver {
     galois::gDebug("RF: ", RF);
   }
 
-  template <typename Graph, typename BL,
-            typename GNode = typename Graph::GraphNode,
-            typename T     = typename BL::value_type>
-  void AssignBoundary(Graph& graph, BL& boundary) {
-    galois::do_all(
-        galois::iterate(0ul, NUM_CELLS),
-        [&](T node) noexcept {
-          if (node > NUM_CELLS)
-            return;
+  void AssignBoundary() {
+    if (source_type == scatter) {
+      std::size_t n = xy2id({0., 0.});
+      boundary.push(n);
+    } else {
+      galois::do_all(
+          galois::iterate(0ul, NUM_CELLS),
+          [&](GNode node) noexcept {
+            if (node > NUM_CELLS)
+              return;
 
-          if (NonNegativeRegion(id2xy(node))) {
-            for (auto e : graph.edges(node, no_lockable_flag)) {
-              GNode dst = graph.getEdgeDst(e);
-              if (!NonNegativeRegion(id2xy(dst))) {
-                // #ifndef NDEBUG
-                //             auto c = id2xyz(node);
-                //             galois::gDebug(node, " (", c[0], " ", c[1], " ",
-                //             c[2], ")");
-                // #endif
-                boundary.push(node);
-                break;
+            if (NonNegativeRegion(id2xy(node))) {
+              for (auto e : graph.edges(node, no_lockable_flag)) {
+                GNode dst = graph.getEdgeDst(e);
+                if (!NonNegativeRegion(id2xy(dst))) {
+                  // #ifndef NDEBUG
+                  //             auto c = id2xyz(node);
+                  //             galois::gDebug(node, " (", c[0], " ", c[1], "
+                  //             ", c[2], ")");
+                  // #endif
+                  boundary.push(node);
+                  break;
+                }
               }
             }
-          }
-        },
-        galois::loopname("assignBoundary"));
-  }
-
-  // template <typename WL>
-  // void AssignBoundary(WL& boundary) {
-  //   for (GNode i = 0; i < nx * ny; i++) {
-  //     boundary.push(i);
-  //   }
-  // }
-
-  template <typename BL>
-  void AssignBoundary(BL& boundary) {
-    // #ifndef NDEBUG
-    //   GNode n = xyz2id({0., 0., 0.});
-    //   auto c = id2xyz(n);
-    //   galois::gDebug(n, " (", c[0], " ", c[1], " ", c[2], ")");
-    // #endif
-    std::size_t n = xy2id({0., 0.});
-    boundary.push(n);
+          },
+          galois::loopname("assignBoundary"));
+    }
   }
 
   /////////////////////////////////////////////
 
   ///////////////////////////////////////////////////////////////////////////////
 
-  template <typename T = typename BL::value_type>
   void initBoundary() {
     galois::do_all(
         galois::iterate(boundary.begin(), boundary.end()),
-        [&](const T& node) noexcept {
+        [&](const BL::value_type& node) noexcept {
           auto& curData = graph.getData(node, galois::MethodFlag::UNPROTECTED);
-          curData.tag   = KNOWN;
-          curData.solution = BoundaryCondition(id2xy(node));
+          curData.solution.store(BoundaryCondition(id2xy(node)),
+                                 std::memory_order_relaxed);
         },
         galois::no_stats(), galois::loopname("initializeBoundary"));
   }
@@ -330,7 +353,6 @@ class Solver {
     auto FindUpwind = [&](It ei) {
       GNode neighbor = graph.getEdgeDst(ei);
       auto& n_data   = graph.getData(neighbor, no_lockable_flag);
-      galois::gDebug("Check neighbor ", neighbor, (int)n_data.tag);
       if (data_t n_sln = n_data.solution.load(std::memory_order_relaxed);
           n_sln < up_sln) {
         up_sln = n_sln;
@@ -366,8 +388,8 @@ class Solver {
     }
     // local computation, nothing about graph
     if (non_zero_counter == 0)
-      return INF;
-    galois::gDebug("solveQuadratic: #non_zero: ", non_zero_counter);
+      return sln;
+    galois::gDebug("solveQuadratic: #upwind_dirs: ", non_zero_counter);
 
     std::sort(sln_delta.begin(), sln_delta.end(),
               [&](std::pair<data_t, data_t>& a, std::pair<data_t, data_t>& b) {
@@ -378,7 +400,11 @@ class Solver {
     do {
       const auto& [s, d] = *p++;
       galois::gDebug(s, " ", d);
-      assert(s < sln && d && "bad pair");
+      // Arrival time may be updated in previous rounds
+      // in which case remaining upwind dirs become invalid
+      if (sln < s)
+        break;
+
       double temp = 1. / (d * d);
       a += temp;
       temp *= s;
@@ -410,60 +436,6 @@ class Solver {
   ////////////////////////////////////////////////////////////////////////////////
 
   ////////////////////////////////////////////////////////////////////////////////
-  // first iteration
-
-  template <bool CONCURRENT, typename Graph, typename BL, typename WL,
-            typename GNode = typename Graph::GraphNode,
-            typename BT    = typename BL::value_type,
-            typename WT    = typename WL::value_type>
-  void FirstIteration(Graph& graph, BL& boundary, WL& init_wl) {
-    using Loop = typename std::conditional<CONCURRENT, galois::DoAll,
-                                           galois::StdForEach>::type;
-    Loop loop;
-
-    loop(
-        galois::iterate(boundary.begin(), boundary.end()),
-        [&](BT node) noexcept {
-          for (auto e : graph.edges(node, no_lockable_flag)) {
-            GNode dst = graph.getEdgeDst(e);
-
-            if (dst >= NUM_CELLS)
-              continue;
-            auto& dstData = graph.getData(dst, no_lockable_flag);
-            // assert(!dstData.is_ghost);
-
-            data_t sln_temp = solveQuadratic<CONCURRENT>(
-                dstData, graph.edge_begin(dst, no_lockable_flag),
-                graph.edge_end(dst, no_lockable_flag));
-            if (data_t old_sln = galois::atomicMin(dstData.solution, sln_temp);
-                sln_temp < old_sln) {
-#if 0 // ndef NDEBUG
-              if (auto old_tag = dstData.tag.load(std::memory_order_relaxed);
-                  old_tag == BAND) {
-                if constexpr (CONCURRENT) {
-                  bool in_wl = false;
-                  for (auto [_, i] : init_wl) {
-                    if (i == node) {
-                      in_wl = true;
-                      break;
-                    }
-                  }
-                  assert(in_wl);
-                }
-                return;
-              }
-#endif
-              if constexpr (CONCURRENT)
-                init_wl.push(WT{sln_temp, dst});
-              else
-                init_wl.push(WT{sln_temp, dst}, old_sln);
-            }
-          }
-        },
-        galois::loopname("FirstIteration"));
-  }
-
-  ////////////////////////////////////////////////////////////////////////////////
 
   ////////////////////////////////////////////////////////////////////////////////
   // Operator
@@ -475,16 +447,26 @@ class Solver {
             typename GNode = typename Graph::GraphNode,
             typename T     = typename WL::value_type>
   void FastMarching(Graph& graph, WL& wl) {
-    double max_error           = 0;
-    std::size_t num_iterations = 0;
 
     auto PushOp = [&](const auto& item, auto& wl) {
       using ItemTy = std::remove_cv_t<std::remove_reference_t<decltype(item)>>;
       // typename ItemTy::second_type node;
       // std::tie(std::ignore, node) = item;
-      auto [old_sln_, node] = item; // gcc >= 9.2
+      auto [old_sln, node] = item;
       assert(node < NUM_CELLS && "Ghost Point!");
-      auto& curData = graph.getData(node, galois::MethodFlag::UNPROTECTED);
+#ifndef NDEBUG
+      {
+        auto [i, j] = id2ij(node);
+        galois::gDebug("Pop ", old_sln, " - ", node, " (", i, " ", j, ")");
+      }
+#endif
+      auto& curData      = graph.getData(node, galois::MethodFlag::UNPROTECTED);
+      const data_t s_sln = curData.solution.load(std::memory_order_relaxed);
+
+      // Ignore stale repetitive work items
+      if (s_sln < old_sln) {
+        return;
+      }
 
       // UpdateNeighbors
       for (auto e : graph.edges(node, no_lockable_flag)) {
@@ -493,33 +475,50 @@ class Solver {
         if (dst >= NUM_CELLS)
           continue;
         auto& dstData = graph.getData(dst, no_lockable_flag);
+#ifndef NDEBUG
+        {
+          auto [i, j] = id2ij(dst);
+          galois::gDebug("Processing ", dst, " (", i, " ", j, ") ",
+                         dstData.solution.load(std::memory_order_relaxed));
+        }
+#endif
 
-        // chaotic execution: KNOWN neighbor doesn't suffice with smaller value
-        //   reason: circle-back update
-        //   ... but it holds with ordered serial execution
-        // smaller value doesn't suffice to be KNOWN - by-pass to be active
-        if (dstData.solution.load(std::memory_order_relaxed) <=
-            curData.solution.load(std::memory_order_relaxed))
+        // Given that the arrival time propagation is non-descending
+        if (dstData.solution.load(std::memory_order_relaxed) <= s_sln) {
           continue;
+        }
 
         data_t sln_temp = solveQuadratic<CONCURRENT>(
             dstData, graph.edge_begin(dst, no_lockable_flag),
             graph.edge_end(dst, no_lockable_flag));
+#ifndef NDEBUG
+        {
+          auto [i, j] = id2ij(dst);
+          galois::gDebug("New val ", dst, " (", i, " ", j, ") ", sln_temp);
+        }
+#endif
         if (data_t old_sln = galois::atomicMin(dstData.solution, sln_temp);
             sln_temp < old_sln) {
           if constexpr (CONCURRENT) {
-            // if (old_tag != BAND) {
             wl.push(ItemTy{sln_temp, dst});
-            //}
           } else {
-            bool in_wl = false;
-            for (auto [_, i] : wl) {
-              if (i == dst) {
-                in_wl = true;
-                break;
+#ifndef NDEBUG
+            {
+              galois::gDebug("-- update heap");
+              bool in_wl = false;
+              for (auto [_, n] : wl) {
+                auto [i, j] = id2ij(n);
+                galois::gDebug(_, " - ", n, " (", i, " ", j, ")");
+                if (n == dst) {
+                  in_wl = true;
+                  break;
+                }
               }
+              if (in_wl)
+                galois::gDebug("repetitive item!");
+              galois::gDebug("-- updated heap");
             }
-            assert(!in_wl);
+#endif
             wl.push(ItemTy{sln_temp, dst}, old_sln);
           }
         }
@@ -527,7 +526,6 @@ class Solver {
     };
 
     if constexpr (CONCURRENT) {
-      galois::GReduceMax<double> max_error;
       auto Indexer = [&](const T& item) {
         unsigned t = std::round(item.first * RF);
         // galois::gDebug(item.first, "\t", t, "\n");
@@ -536,25 +534,36 @@ class Solver {
       using PSchunk =
           galois::worklists::PerSocketChunkLIFO<32>; // chunk size 16
       using OBIM =
-          galois::worklists::OrderedByIntegerMetric<decltype(Indexer), PSchunk>;
-
+          galois::worklists::AdaptiveOrderedByIntegerMetric<decltype(Indexer),
+                                                            PSchunk>;
+#ifdef GALOIS_ENABLE_VTUNE
       galois::runtime::profileVtune(
           [&]() {
+#endif
             galois::for_each(galois::iterate(wl.begin(), wl.end()), PushOp,
                              galois::disable_conflict_detection(),
                              // galois::no_stats(),  // stat iterations
                              galois::wl<OBIM>(Indexer),
                              galois::loopname("FMM"));
+#ifdef GALOIS_ENABLE_VTUNE
           },
           "FMM_VTune");
+#endif
     } else {
+      std::size_t num_iterations = 0;
+
       while (!wl.empty()) {
 
         PushOp(wl.pop(), wl);
 
         num_iterations++;
+
+#ifndef NDEBUG
+        sleep(1); // Debug pause
+        galois::gDebug("\n********\n");
+#endif
       }
-      galois::gDebug("max error: ", max_error);
+
       galois::gPrint("#iterarions: ", num_iterations, "\n");
     }
   }
@@ -568,32 +577,31 @@ class Solver {
   void runAlgo() {
     WL initBag;
 
-    FirstIteration<CONCURRENT>(graph, boundary, initBag);
+    using Loop = typename std::conditional<CONCURRENT, galois::DoAll,
+                                           galois::StdForEach>::type;
+    Loop loop;
+
+    loop(
+        galois::iterate(boundary.begin(), boundary.end()),
+        [&](GNode node) noexcept {
+          auto& curData = graph.getData(node, galois::MethodFlag::UNPROTECTED);
+          pushWrap(initBag,
+                   {curData.solution.load(std::memory_order_relaxed), node});
+        },
+        galois::loopname("FirstIteration"));
 
     if (initBag.empty()) {
-      galois::gDebug("No cell to be processed!");
-      std::abort();
+      GALOIS_DIE("No cell to be processed!");
 #ifndef NDEBUG
     } else {
       galois::gDebug("vvvvvvvv init band vvvvvvvv");
-      for (auto [_, i] : initBag) {
+      for (auto [k, i] : initBag) {
         auto [x, y] = id2xy(i);
-        galois::gDebug(i, " (", x, " ", y, ") with ",
-                       graph.getData(i, no_lockable_flag).solution);
+        galois::gDebug(k, " - ", i, " (", x, " ", y, "): arrival_time=",
+                       graph.getData(i, no_lockable_flag)
+                           .solution.load(std::memory_order_relaxed));
       }
       galois::gDebug("^^^^^^^^ init band ^^^^^^^^");
-
-      galois::do_all(
-          galois::iterate(initBag),
-          [&](auto pair) {
-            galois::gDebug(pair.first, " : ", pair.second);
-            auto [_, node] = pair;
-            auto& curData  = graph.getData(node, no_lockable_flag);
-            if (curData.tag != BAND) {
-              galois::gDebug("non-BAND");
-            }
-          },
-          galois::no_stats(), galois::loopname("DEBUG_initBag_sanity_check"));
 #endif // end of initBag sanity check;
     }
 
@@ -606,6 +614,39 @@ class Solver {
   // Sanity check
 
   void SanityCheck() {
+    galois::GReduceMax<double> max_error;
+
+    galois::do_all(
+        galois::iterate(graph.begin(), graph.end()),
+        [&](GNode node) noexcept {
+          if (node >= NUM_CELLS)
+            return;
+
+          auto& my_data = graph.getData(node, no_lockable_flag);
+          if (my_data.solution.load(std::memory_order_relaxed) == INF) {
+            galois::gPrint("Untouched cell: ", node, "\n");
+          }
+          data_t new_val = solveQuadratic<false>(
+              my_data, graph.edge_begin(node, no_lockable_flag),
+              graph.edge_end(node, no_lockable_flag));
+          if (data_t old_val = my_data.solution.load(std::memory_order_relaxed);
+              new_val != old_val) {
+            data_t error = std::abs(new_val - old_val) / std::abs(old_val);
+            max_error.update(error);
+            if (error > tolerance) {
+              auto [x, y] = id2xy(node);
+              galois::gPrint("Error bound violated at cell ", node, " (", x,
+                             " ", y, "): old_val=", old_val,
+                             " new_val=", new_val, " error=", error, "\n");
+            }
+          }
+        },
+        galois::no_stats(), galois::loopname("sanityCheck"));
+
+    galois::gPrint("MAX ERROR: ", max_error.reduce(), "\n");
+  }
+
+  void SanityCheck2() {
     galois::GReduceMax<double> max_error;
 
     galois::do_all(
@@ -627,14 +668,12 @@ class Solver {
               break;
             GNode neighbor   = graph.getEdgeDst(dir);
             auto& first_data = graph.getData(neighbor, no_lockable_flag);
-            // assert(first_data.is_ghost || first_data.tag == KNOWN);
             std::advance(dir, 1); // opposite direction of the same dimension
             assert(dir != graph.edge_end(node, no_lockable_flag));
             neighbor          = graph.getEdgeDst(dir);
             auto& second_data = graph.getData(neighbor, no_lockable_flag);
-            // assert(second_data.is_ghost || second_data.tag == KNOWN);
-            data_t s1 = (curData.solution - first_data.solution) / d,
-                   s2 = (curData.solution - second_data.solution) / d;
+            data_t s1         = (curData.solution - first_data.solution) / d,
+                   s2         = (curData.solution - second_data.solution) / d;
             val += std::pow(std::max(0., std::max(s1, s2)), 2);
             std::advance(dir, 1);
           }
@@ -650,29 +689,9 @@ class Solver {
             return;
           }
         },
-        galois::no_stats(), galois::loopname("sanityCheck"));
+        galois::no_stats(), galois::loopname("sanityCheck2"));
 
     galois::gPrint("MAX ERROR: ", max_error.reduce(), "\n");
-  }
-
-  template <typename Graph, typename GNode = typename Graph::GraphNode>
-  void SanityCheck2(Graph& graph) {
-    galois::do_all(
-        galois::iterate(0ul, NUM_CELLS),
-        [&](GNode node) noexcept {
-          auto [x, y]    = id2xy(node);
-          auto& solution = graph.getData(node).solution;
-          assert(std::abs(solution - std::sqrt(x * x + y * y)));
-        },
-        galois::no_stats(), galois::loopname("sanityCheck2"));
-  }
-
-  template <typename GNode>
-  void _debug_print() {
-    for (GNode i = 0; i < NUM_CELLS; i++) {
-      auto [x, y] = id2xy(i);
-      galois::gDebug(x, " ", y, " ", xy2id({x, y}));
-    }
   }
 
   std::unique_ptr<segystack::SegyFile> segy_ptr;
@@ -702,9 +721,7 @@ class Solver {
         if (node >= NUM_CELLS)
           break;
         auto& curData    = graph.getData(node, galois::MethodFlag::UNPROTECTED);
-        curData.is_ghost = (node >= NUM_CELLS);
-        curData.tag      = Tag(FAR); // TODO why compile error after import npy?
-        curData.solution = INF;      // TODO ghost init?
+        curData.solution = INF; // TODO ghost init?
 
         auto [i, j] = id2ij(node);
         if (i != read_traces) {
@@ -725,16 +742,18 @@ class Solver {
       assert(npy.shape.size() == 2 && "Data map should be 2-D");
       std::size_t x = npy.shape[0], y = npy.shape[1];
 
-      /* symmetric
+#if 0 // symmetric, for marmousi
       xa = -.625 * data_t(x + 1);
       xb = .625 * data_t(x + 1);
       ya = -.625 * data_t(y + 1);
       yb = .625 * data_t(y + 1);
-      */
+#endif
+#if 0 // asymmetric, for marmousi
       xa = -1.25;
       xb = 1.25 * data_t(x);
       ya = -1.25;
       yb = 1.25 * data_t(y);
+#endif
       SetKnobs({x, y});
 
       ConstructCsrGrids(graph, std::array<std::size_t, 2>{x, y});
@@ -743,8 +762,6 @@ class Solver {
         if (node >= NUM_CELLS)
           break;
         auto& curData    = graph.getData(node, galois::MethodFlag::UNPROTECTED);
-        curData.is_ghost = (node >= NUM_CELLS);
-        curData.tag      = FAR;
         curData.solution = INF; // TODO ghost init?
         curData.speed    = npy_data[node] * .001;
       }
@@ -783,8 +800,6 @@ class Solver {
           if (!d)
             GALOIS_DIE("In-line csv parsing failed.");
           auto& curData = graph.getData(node, galois::MethodFlag::UNPROTECTED);
-          curData.is_ghost = (node >= NUM_CELLS);
-          curData.tag      = FAR;
           curData.solution = INF; // TODO ghost init?
           curData.speed    = d * .001;
           ++node;
@@ -806,8 +821,6 @@ class Solver {
           [&](auto node) noexcept {
             auto& curData =
                 graph.getData(node, galois::MethodFlag::UNPROTECTED);
-            curData.is_ghost = (node >= NUM_CELLS);
-            curData.tag      = FAR;
             curData.speed    = SpeedFunction(id2xy(node));
             curData.solution = INF; // TODO ghost init?
           },
@@ -823,10 +836,7 @@ public:
 
     //! Boundary assignment and initialization
     // TODO better way for boundary settings?
-    if (source_type == scatter)
-      AssignBoundary(boundary);
-    else
-      AssignBoundary(graph, boundary);
+    AssignBoundary();
     if (boundary.empty())
       GALOIS_DIE("Boundary not found!");
 
@@ -860,7 +870,7 @@ public:
     Tmain.stop();
 
     SanityCheck();
-    // SanityCheck2(graph);
+
     if (!output_npy.empty())
       DumpToNpy(graph);
     else if (!output_csv.empty())

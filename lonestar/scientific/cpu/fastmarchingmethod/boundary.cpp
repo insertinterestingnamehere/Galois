@@ -36,6 +36,8 @@ bool NonNegativeRegion(double2d_t&& coords) {
   return 100. * x + y >= 0.;
 }
 
+// 3D
+
 template <>
 double BoundaryCondition(double3d_t&& coords) {
   [[maybe_unused]] const auto& [x, y, z] = coords;
