@@ -16,21 +16,22 @@
  * including but not limited to those resulting from defects in Software and/or
  * Documentation, or loss or inaccuracy of data of any kind.
  */
+#ifdef FMM_3D
 /**
  * Convert node ID into grid coordinate tuple.
  */
 template <typename GNode>
-size3d_t getPos(const GNode node) {
+size3d_t id2ijk(const GNode node) {
   if (node >= NUM_CELLS)
     return {};
-  auto res      = std::lldiv(node, nx * ny);
+  auto res      = std::lldiv(node, ny * nz);
   std::size_t i = res.quot;
-  res           = std::lldiv(res.rem, ny);
+  res           = std::lldiv(res.rem, nz);
   std::size_t j = res.quot;
   std::size_t k = res.rem;
 
-  assert(i < nz && j < nx && k < ny);
-  return std::array<std::size_t, 3>({j, k, i});
+  assert(i < nx && j < ny && k < nz);
+  return std::array<std::size_t, 3>({i, j, k});
 }
 /**
  * Convert node ID into coordinate tuple.
@@ -40,18 +41,18 @@ size3d_t getPos(const GNode node) {
  * @return Coordinate tuple (x, y, z)
  */
 template <typename GNode>
-double3d_t getCoord(const GNode node) {
+double3d_t id2xyz(const GNode node) {
   if (node >= NUM_CELLS)
     return {};
-  auto res = std::lldiv(node, nx * ny);
+  auto res = std::lldiv(node, ny * nz);
   double i = res.quot;
-  res      = std::lldiv(res.rem, ny);
+  res      = std::lldiv(res.rem, nz);
   double j = res.quot;
   double k = res.rem;
 
-  double x = xa + dx * (j + 1);
-  double y = ya + dy * (k + 1);
-  double z = za + dz * (i + 1);
+  double x = xa + dx * (i + 1);
+  double y = ya + dy * (j + 1);
+  double z = za + dz * (k + 1);
   // galois::gDebug(i, " ", j, " ", k);
   // galois::gDebug(dx, " - ", dy, " - ", dz);
   assert(x < xb && y < yb && z < zb);
@@ -60,13 +61,55 @@ double3d_t getCoord(const GNode node) {
 
 /**
  * Convert coordinate tuple into node ID.
- * See getCoord
+ * See id2xyz
  */
 template <typename GNode>
-GNode getNodeID(const double3d_t& coords) {
+GNode xyz2id(const double3d_t& coords) {
   uint64_t i = std::round((coords[2] - za) / dz - 1.);
   uint64_t j = std::round((coords[0] - xa) / dx - 1.);
   uint64_t k = std::round((coords[1] - ya) / dy - 1.);
 
-  return i * nx * ny + j * ny + k;
+  return i * ny * nz + j * nz + k;
+}
+#endif
+
+/**
+ * 2D
+ */
+size2d_t id2ij(const std::size_t node) {
+  if (node >= NUM_CELLS)
+    return {};
+  auto res      = std::lldiv(node, ny);
+  std::size_t i = res.quot;
+  std::size_t j = res.rem;
+
+  assert(i < nx && j < ny);
+  return std::array<std::size_t, 2>({i, j});
+}
+
+inline std::size_t ij2id(const size2d_t ij) {
+  auto [i, j] = ij;
+  return i * ny + j;
+}
+
+double2d_t id2xy(const std::size_t node) {
+  if (node >= NUM_CELLS)
+    return {};
+  auto res = std::lldiv(node, ny);
+  double i = res.quot;
+  double j = res.rem;
+
+  double x = xa + dx * (i + 1);
+  double y = ya + dy * (j + 1);
+  // galois::gDebug(i, " ", j);
+  // galois::gDebug(dx, " - ", dy);
+  assert(x < xb && y < yb);
+  return std::array<data_t, 2>({x, y});
+}
+
+std::size_t xy2id(const double2d_t& coords) {
+  uint64_t i = std::round((coords[0] - xa) / dx - 1.);
+  uint64_t j = std::round((coords[1] - ya) / dy - 1.);
+
+  return i * ny + j;
 }

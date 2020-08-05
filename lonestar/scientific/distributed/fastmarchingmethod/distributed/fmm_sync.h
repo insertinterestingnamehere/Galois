@@ -65,6 +65,6 @@ bool minArray(Ty& a_arr, const Ty& b_arr) {
     }                                                                          \
   }
 #endif
-GALOIS_SYNC_STRUCTURE_REDUCE_PARE_WISE_MIN(upwind_solution, sync_double3d_t);
+GALOIS_SYNC_STRUCTURE_REDUCE_PARE_WISE_MIN(upwind_solution, sync_array_t);
 GALOIS_SYNC_STRUCTURE_BITSET(upwind_solution);
 #endif

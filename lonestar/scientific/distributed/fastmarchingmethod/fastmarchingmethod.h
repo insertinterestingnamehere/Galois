@@ -18,14 +18,14 @@
  */
 
 #include <array>
+using double2d_t = std::array<double, 2>;
+using double3d_t = std::array<double, 3>;
+using size2d_t   = std::array<std::size_t, 2>;
+using size3d_t   = std::array<std::size_t, 3>;
 
 // Idk why this hasn't been standardized in C++ yet, but here it is.
 static constexpr double PI =
     3.1415926535897932384626433832795028841971693993751;
-
-using double2d_t = std::array<double, 2>;
-using double3d_t = std::array<double, 3>;
-using size3d_t   = std::array<std::size_t, 3>;
 
 template <typename Tuple>
 double SpeedFunction(Tuple&& coords = {});

@@ -266,6 +266,8 @@ auto ConstructCsrGrids(Graph& built_graph,
   static_assert(D == 2 || D == 3, "Only support 2-D or 3-D for now.");
   galois::graphs::FileGraphWriter temp_graph;
   auto params = WriteCsrGrids<typename Graph::edge_data_type>(temp_graph, dims);
+  // temp_graph.toFile("/net/ohm/export/iss/inputs/synth_grids/"
+  //                   "p_wave_velocity_x4.gr");
   galois::graphs::readGraph(built_graph, temp_graph);
   return params;
 }

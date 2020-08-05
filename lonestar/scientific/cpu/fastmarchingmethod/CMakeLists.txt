@@ -2,22 +2,12 @@
   app(grids_gen grids_gen.cpp)
   set_property(TARGET grids_gen PROPERTY CXX_STANDARD 17)
 
-  set(google_segystack_src
-        google-segystack/mmap_file.cc
-        google-segystack/segy_file.cc
-        google-segystack/float_util.cc
-     )
-  add_library(google-segystack STATIC ${google_segystack_src})
-  target_link_libraries(google-segystack PUBLIC galois_shmem)
-
-  add_library(numpy-cpp STATIC numpy/cnpy.cpp)
-  # target_link_libraries(numpy-cpp PUBLIC galois_shmem)
-  set_property(TARGET numpy-cpp APPEND PROPERTY COMPILE_FLAGS " -Wno-unused ")
+  add_subdirectory(util)
 
   app(fmm fmm.cpp speed_function.cpp boundary.cpp)
   set_property(TARGET fmm PROPERTY CXX_STANDARD 17)
   set_property(TARGET fmm APPEND PROPERTY COMPILE_FLAGS " -Werror=unused ")
-  target_link_libraries(fmm PRIVATE google-segystack PRIVATE numpy-cpp)
+  target_link_libraries(fmm PUBLIC google-segystack PUBLIC numpy-cpp)
   # find_package(Eigen3 CONFIG)
   # if(Eigen3_FOUND)
   #   target_link_libraries(fmm PRIVATE Eigen3::Eigen)
