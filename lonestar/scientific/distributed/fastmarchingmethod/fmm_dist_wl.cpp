@@ -16,13 +16,14 @@
  * including but not limited to those resulting from defects in Software and/or
  * Documentation, or loss or inaccuracy of data of any kind.
  */
-#ifndef GALOIS_FMM_DIST_PULL
-#define GALOIS_FMM_DIST_PULL
+#ifndef GALOIS_FMM_DIST_WL
+#define GALOIS_FMM_DIST_WL
 #endif
 
 #include <galois/Galois.h>
 #include <galois/graphs/FileGraph.h>
 #include <galois/graphs/Graph.h>
+#include <galois/ArrayWrapper.h>
 
 // Vendored from an old version of LLVM for Lonestar app command line handling.
 #include "llvm/Support/CommandLine.h"
@@ -42,7 +43,7 @@ constexpr static char const* REGION_NAME = "FMM";
 
 #define DIM_LIMIT 2 // 2-D specific
 using data_t         = double;
-constexpr data_t INF = std::numeric_limits<double>::max();
+constexpr data_t INF = std::numeric_limits<data_t>::infinity();
 
 enum Algo { serial = 0, parallel };
 enum SourceType { scatter = 0, analytical };
@@ -168,16 +169,23 @@ static data_t dx, dy;
 
 // No fine-grained locks built into the graph.
 // Use atomics for ALL THE THINGS!
+using sync_array_t =
+    galois::CopyableArray<galois::CopyableAtomic<data_t>, DIM_LIMIT>;
 struct NodeData {
   data_t speed; // read only
+  sync_array_t upwind_solution;
   data_t solution;
 };
-galois::DynamicBitSet bitset_solution;
+galois::DynamicBitSet bitset_upwind_solution;
 
 using Graph = galois::graphs::DistGraph<NodeData, void>;
 using GNode = Graph::GraphNode;
 using BL    = galois::InsertBag<GNode>;
 std::unique_ptr<galois::graphs::GluonSubstrate<Graph>> syncSubstrate;
+
+using UpdateRequest = std::pair<data_t, GNode>;
+using WL            = galois::InsertBag<UpdateRequest>;
+std::unique_ptr<WL> initBag;
 
 #include "distributed/fmm_sync.h"
 #include "structured/grids.h"
@@ -230,6 +238,9 @@ static void initCells(Graph& graph) {
         auto& node_data    = graph.getData(node);
         node_data.solution = INF;
         assert(graph.getGID(node) >= NUM_CELLS || node_data.speed > 0);
+        for (auto& i : node_data.upwind_solution) {
+          i = INF; // TODO store
+        };
       },
       galois::no_stats(),
       galois::loopname(
@@ -250,52 +261,65 @@ static void initBoundary(Graph& graph, BL& boundary) {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-template <typename Graph, typename It = typename Graph::edge_iterator>
-bool pullUpdate(Graph& graph, data_t& up_sln, It dir) {
+template <typename Graph, typename It = typename Graph::edge_iterator,
+          typename UserContext>
+bool pushUpdate(Graph& graph, const data_t& up_sln, It dir, UserContext& wl) {
 
   bool didWork = false;
 
-  auto uni_pull = [&](It ei) {
-    GNode neighbor = graph.getEdgeDst(ei);
-    if (graph.getGID(neighbor) >= NUM_CELLS)
-      return;
-    auto& n_data = graph.getData(neighbor);
-    if (data_t n_sln = n_data.solution; n_sln < up_sln) {
-      up_sln  = n_sln;
-      didWork = true;
-    }
-  };
+  for (int i = 0; i < DIM_LIMIT; ++i) {
+    auto uni_push = [&](It ei) {
+      GNode dst = graph.getEdgeDst(ei);
+      if (graph.getGID(dst) >= NUM_CELLS)
+        return;
+      auto& dst_data = graph.getData(dst);
+      if (up_sln >= dst_data.solution)
+        return;
+      if (auto& us = dst_data.upwind_solution[i];
+          up_sln < galois::atomicMin(us, up_sln)) {
+        bitset_upwind_solution.set(dst);
+        didWork |= true;
+        wl.push(UpdateRequest{up_sln, dst});
+      }
+#ifndef NDEBUG
+      if (dst == 1104) {
+        auto [ii, jj]    = id2ij(graph.getGID(dst));
+        auto [unwrapped] = dst_data.upwind_solution;
+        auto [a, b]      = unwrapped;
+        DGDEBUG("update ", dst, " (g", graph.getGID(dst),
+                (dst < graph.numMasters() ? "M" : "m"), ") (", ii, " ", jj,
+                ") upwind_solution: ", a, " ", b);
+      }
+#endif
+    };
 
-  // check one neighbor
-  uni_pull(dir++);
-  // check the other neighbor
-  uni_pull(dir);
+    // check one neighbor
+    uni_push(dir++);
+    // check the other neighbor
+    uni_push(dir++);
+  }
   return didWork;
 }
-
 ////////////////////////////////////////////////////////////////////////////////
 // Solver
 
-template <typename Graph, typename NodeData, typename It>
-data_t solveQuadratic(Graph& graph, NodeData& my_data, It edge_begin,
-                      It edge_end) {
-  assert(edge_end - edge_begin == DIM_LIMIT * 2);
-  data_t sln         = my_data.solution;
-  const data_t speed = my_data.speed;
+template <typename NodeData>
+data_t solveQuadraticPush(NodeData& my_data) {
+  const auto& upwind_sln = my_data.upwind_solution;
+  data_t sln             = my_data.solution;
+  const data_t speed     = my_data.speed;
 
   std::array<std::pair<data_t, data_t>, DIM_LIMIT> sln_delta = {
       std::make_pair(sln, dx), std::make_pair(sln, dy)};
 
   int non_zero_counter = 0;
-  auto dir             = edge_begin;
-  for (auto& [s, d] : sln_delta) {
-    if (dir >= edge_end)
-      GALOIS_DIE("Dimension exceeded");
 
-    if (pullUpdate(graph, s, dir)) {
+  for (int i = 0; i < DIM_LIMIT; i++) {
+    auto& [s, d] = sln_delta[i];
+    if (data_t us = upwind_sln[i]; us < s) {
+      s = us;
       non_zero_counter++;
     }
-    std::advance(dir, 2);
   }
   // local computation, nothing about graph
   if (non_zero_counter == 0)
@@ -337,15 +361,56 @@ data_t solveQuadratic(Graph& graph, NodeData& my_data, It edge_begin,
   } while (--non_zero_counter);
   return sln;
 }
+
+////////////////////////////////////////////////////////////////////////////////
+// first iteration
+
+static void FirstIteration(Graph& graph, BL& boundary) {
+  galois::do_all(
+      galois::iterate(boundary.begin(), boundary.end()),
+      [&](GNode b) noexcept {
+        if (graph.getGID(b) >= NUM_CELLS)
+          return;
+        auto dir = graph.edge_begin(b);
+        if (dir >= graph.edge_end(b))
+          return;
+        auto& b_data = graph.getData(b);
+#ifndef NDEBUG
+        auto [i, j] = id2ij(graph.getGID(b));
+        DGDEBUG("FirstItr: ", b, " (g", graph.getGID(b),
+                (b < graph.numMasters() ? "M" : "m"), ") (", i, " ", j,
+                ") sln:", b_data.solution);
+#endif
+        pushUpdate(graph, b_data.solution, dir, *initBag);
+      },
+      galois::loopname("FirstIteration"));
+
+  syncSubstrate
+      ->sync<writeDestination, readSource, Reduce_pair_wise_min_upwind_solution,
+             Bitset_upwind_solution>("FirstIteration");
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
 ////////////////////////////////////////////////////////////////////////////////
 // FMM
 
 void FastMarching(Graph& graph) {
+  auto Indexer = [&](const UpdateRequest& item) {
+    unsigned t = std::round(item.first * RF);
+    // galois::gDebug(item.first, "\t", t, "\n");
+    return t;
+  };
+  using PSchunk = galois::worklists::PerSocketChunkLIFO<32>; // chunk size 16
+  using OBIM =
+      galois::worklists::OrderedByIntegerMetric<decltype(Indexer), PSchunk>;
+
   using DGTerminatorDetector = galois::DGAccumulator<uint32_t>;
   DGTerminatorDetector more_work;
   unsigned _round_counter = 0;
 
-  const auto& nodes_with_edges = graph.allNodesWithEdgesRange();
+  // const auto& nodes_with_edges = graph.allNodesWithEdgesRange();
+  // const auto& all_nodes = graph.allNodesRange();
 
 #ifdef GALOIS_ENABLE_VTUNE
   galois::runtime::profileVtune(
@@ -355,45 +420,53 @@ void FastMarching(Graph& graph) {
 #ifndef NDEBUG
           sleep(5); // Debug pause
           galois::gDebug("\n********\n");
+          // print boundary
+          for (auto& item : (*initBag)) {
+            auto [_, b]   = item;
+            auto [ii, jj] = id2ij(graph.getGID(b));
+            galois::gPrint(_, " init: ", b, "(g", graph.getGID(b),
+                           (b < graph.numMasters() ? "M" : "m"), ") (", ii, " ",
+                           jj, ") with ", graph.getData(b).solution, "\n");
+          }
 #endif
           syncSubstrate->set_num_round(_round_counter);
           more_work.reset();
-          galois::do_all(
-              galois::iterate(nodes_with_edges),
-              [&](GNode node) {
+          galois::for_each(
+              galois::iterate((*initBag).begin(), (*initBag).end()),
+              [&](const UpdateRequest& item, auto& wl) {
+                auto [_, node] = item;
                 if (graph.getGID(node) >= NUM_CELLS)
                   return;
                 auto& node_data = graph.getData(node);
+                if (data_t sln_temp = solveQuadraticPush(node_data);
+                    sln_temp < galois::min(node_data.solution, sln_temp)) {
 #ifndef NDEBUG
-                auto [i, j] = id2ij(graph.getGID(node));
-        // DGDEBUG("Processing ", node, " (g", graph.getGID(node),
-        //         (node < graph.numMasters() ? "M" : "m"), ") (", i, " ",
-        //         j, ") sln:", node_data.solution);
+                  if (node == 1104) {
+                    auto [i, j] = id2ij(graph.getGID(node));
+                    DGDEBUG("Processing ", node, " (g", graph.getGID(node),
+                            (node < graph.numMasters() ? "M" : "m"), ") (", i,
+                            " ", j, ") sln:", node_data.solution);
+                  }
 #endif
-                data_t sln_temp =
-                    solveQuadratic(graph, node_data, graph.edge_begin(node),
-                                   graph.edge_end(node));
-                if (data_t old_sln = galois::min(node_data.solution, sln_temp);
-                    sln_temp < old_sln) {
-                  bitset_solution.set(node);
-                  more_work += 1;
-#ifndef NDEBUG
-                  DGDEBUG("update ", node, " (g", graph.getGID(node),
-                          (node < graph.numMasters() ? "M" : "m"), ") (", i,
-                          " ", j, ") with ", sln_temp);
-                } else {
-          // DGDEBUG(node, " solution not updated: ", sln_temp,
-          //         " (currently ", node_data.solution, ")");
-#endif
+                  auto dir = graph.edge_begin(node);
+                  if (dir >= graph.edge_end(node))
+                    return;
+                  if (pushUpdate(graph, node_data.solution, dir, wl))
+                    more_work += 1;
                 }
               },
-              galois::no_stats(),
-              galois::steal(), // galois::wl<OBIM>(Indexer),
+              galois::disable_conflict_detection(),
+              // galois::no_stats(),  // stat iterations
+              galois::wl<OBIM>(Indexer),
               galois::loopname(
-                  syncSubstrate->get_run_identifier("Pull").c_str()));
+                  syncSubstrate->get_run_identifier("Push").c_str()));
 
-          syncSubstrate->sync<writeSource, readDestination, Reduce_min_solution,
-                              Bitset_solution>("FastMarching");
+          initBag->clear();
+
+          // sleep(5);
+          syncSubstrate->sync<writeDestination, readSource,
+                              Reduce_pair_wise_min_upwind_solution,
+                              Bitset_upwind_solution>("FastMarching");
 
           galois::runtime::reportStat_Tsum(
               REGION_NAME,
@@ -430,8 +503,7 @@ void SanityCheck(Graph& graph) {
           return;
         }
 
-        data_t new_val = solveQuadratic(graph, my_data, graph.edge_begin(node),
-                                        graph.edge_end(node));
+        data_t new_val = solveQuadraticPush(my_data);
         if (data_t old_val = my_data.solution; new_val != old_val) {
           data_t error = std::abs(new_val - old_val) / std::abs(old_val);
           max_error.update(error);
@@ -471,12 +543,17 @@ int main(int argc, char** argv) noexcept {
 
   SetKnobs(dims);
 
+  // if (galois::runtime::getSystemNetworkInterface().ID == 0) {
+  //   std::filesystem::exists(inputname);
+  // }
   galois::StatTimer Ttotal("TimerTotal");
   Ttotal.start();
 
   // generate grids
   std::unique_ptr<Graph> graph;
   std::tie(graph, syncSubstrate) = distGraphInitialization<NodeData, void>();
+
+  initBag.reset(new WL());
 
   // _debug_print();
 
@@ -488,17 +565,8 @@ int main(int argc, char** argv) noexcept {
   // TODO better way for boundary settings?
   BL boundary;
   AssignBoundary(*graph, boundary);
-#ifndef NDEBUG
-  // print boundary
-  galois::gDebug("vvvvvvvv boundary vvvvvvvv");
-  for (GNode b : boundary) {
-    auto [x, y] = id2xy(b);
-    galois::gDebug(b, " (", x, ", ", y, ")");
-  }
-  DGDEBUG("^^^^^^^^ boundary ^^^^^^^^");
-#endif
 
-  bitset_solution.resize(graph->size());
+  bitset_upwind_solution.resize(graph->size());
   galois::runtime::getHostBarrier().wait();
 
   for (int run = 0; run < numRuns; ++run) {
@@ -523,10 +591,11 @@ int main(int argc, char** argv) noexcept {
     } else {
       DGDEBUG("No boundary element");
     }
-    assert(busy.reduce() && "Boundary not defined!");
+    GALOIS_ASSERT(busy.reduce(), "Boundary not defined!");
 
     Tmain.start();
 
+    FirstIteration(*graph, boundary);
     FastMarching(*graph);
 
     Tmain.stop();
@@ -537,13 +606,15 @@ int main(int argc, char** argv) noexcept {
 
     if ((run + 1) != numRuns) {
       galois::runtime::getHostBarrier().wait();
-      bitset_solution.reset();
+      bitset_upwind_solution.reset();
 
+      initBag.reset(new WL());
       initCells(*graph);
       galois::runtime::getHostBarrier().wait();
     }
   }
 
   Ttotal.stop();
+  initBag.reset(nullptr);
   return 0;
 }

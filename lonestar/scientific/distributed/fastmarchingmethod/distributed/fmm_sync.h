@@ -19,10 +19,8 @@
 #ifdef GALOIS_FMM_DIST_PULL
 GALOIS_SYNC_STRUCTURE_REDUCE_MIN(solution, double);
 GALOIS_SYNC_STRUCTURE_BITSET(solution);
-#endif
-
-#ifdef GALOIS_FMM_DIST_PUSH
-// TODO add to AtomicHelpers.h
+#else
+// TODO add to AtomicHelpers.h?
 namespace galois {
 template <typename Ty>
 bool minArray(Ty& a_arr, const Ty& b_arr) {
@@ -33,6 +31,7 @@ bool minArray(Ty& a_arr, const Ty& b_arr) {
   return ret;
 }
 } // namespace galois
+#ifdef GALOIS_FMM_DIST_PUSH
 /**
  * Creates a Galois reduction sync structure that does a pairwise min reduction
  * on an array.
@@ -67,4 +66,46 @@ bool minArray(Ty& a_arr, const Ty& b_arr) {
 #endif
 GALOIS_SYNC_STRUCTURE_REDUCE_PARE_WISE_MIN(upwind_solution, sync_array_t);
 GALOIS_SYNC_STRUCTURE_BITSET(upwind_solution);
+#endif
+#ifdef GALOIS_FMM_DIST_WL
+/**
+ * Creates a Galois reduction sync structure that does a pairwise min reduction
+ * on an array.
+ */
+#ifdef GALOIS_ENABLE_GPU
+// TODO GPU code included
+#else
+// Non-GPU code
+#define GALOIS_SYNC_STRUCTURE_REDUCE_PARE_WISE_MIN(fieldname, fieldtype)       \
+  struct Reduce_pair_wise_min_##fieldname {                                    \
+    GALOIS_DECL_NON_GPU_SYNC_STRUCTURE;                                        \
+    typedef fieldtype ValTy;                                                   \
+                                                                               \
+    template <typename NodeData>                                               \
+    static ValTy extract(uint32_t, const NodeData& node) {                     \
+      return node.fieldname;                                                   \
+    }                                                                          \
+                                                                               \
+    template <typename NodeData>                                               \
+    static bool reduce(uint32_t lid, NodeData& node, ValTy y) {                \
+      if (minArray(node.fieldname, y)) {                                       \
+        initBag->push(                                                         \
+            UpdateRequest{*std::min_element(y.begin(), y.end()), lid});        \
+        return true;                                                           \
+      } else                                                                   \
+        return false;                                                          \
+    }                                                                          \
+                                                                               \
+    template <typename NodeData>                                               \
+    static void reset(uint32_t, NodeData&) {}                                  \
+                                                                               \
+    template <typename NodeData>                                               \
+    static void setVal(uint32_t, NodeData& node, ValTy y) {                    \
+      node.fieldname = y;                                                      \
+    }                                                                          \
+  }
+#endif
+GALOIS_SYNC_STRUCTURE_REDUCE_PARE_WISE_MIN(upwind_solution, sync_array_t);
+GALOIS_SYNC_STRUCTURE_BITSET(upwind_solution);
+#endif
 #endif

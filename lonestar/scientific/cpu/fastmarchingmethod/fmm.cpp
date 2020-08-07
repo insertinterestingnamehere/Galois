@@ -418,6 +418,10 @@ class Solver {
             typename GNode = typename Graph::GraphNode,
             typename T     = typename WL::value_type>
   void FastMarching(Graph& graph, WL& wl) {
+    galois::GAccumulator<std::size_t> emptyWork;
+    galois::GAccumulator<std::size_t> nonEmptyWork;
+    emptyWork.reset();
+    nonEmptyWork.reset();
 
     auto PushOp = [&](const auto& item, auto& wl) {
       using ItemTy = std::remove_cv_t<std::remove_reference_t<decltype(item)>>;
@@ -470,6 +474,7 @@ class Solver {
 #endif
         if (data_t old_sln = galois::atomicMin(dstData.solution, sln_temp);
             sln_temp < old_sln) {
+          // nonEmptyWork += 1;
           if constexpr (CONCURRENT) {
             wl.push(ItemTy{sln_temp, dst});
           } else {
@@ -492,6 +497,8 @@ class Solver {
 #endif
             wl.push(ItemTy{sln_temp, dst}, old_sln);
           }
+        } else {
+          // emptyWork += 1;
         }
       }
     };
@@ -505,8 +512,7 @@ class Solver {
       using PSchunk =
           galois::worklists::PerSocketChunkLIFO<32>; // chunk size 16
       using OBIM =
-          galois::worklists::AdaptiveOrderedByIntegerMetric<decltype(Indexer),
-                                                            PSchunk>;
+          galois::worklists::OrderedByIntegerMetric<decltype(Indexer), PSchunk>;
 #ifdef GALOIS_ENABLE_VTUNE
       galois::runtime::profileVtune(
           [&]() {
@@ -537,6 +543,11 @@ class Solver {
 
       galois::gPrint("#iterarions: ", num_iterations, "\n");
     }
+
+    // galois::runtime::reportParam("Statistics", "EmptyWork",
+    // emptyWork.reduce()); galois::runtime::reportParam("Statistics",
+    // "NonEmptyWork",
+    //                              nonEmptyWork.reduce());
   }
 
   ////////////////////////////////////////////////////////////////////////////////
