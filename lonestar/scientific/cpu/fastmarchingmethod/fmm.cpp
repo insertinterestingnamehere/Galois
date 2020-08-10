@@ -25,31 +25,19 @@
 #include <type_traits>
 #include <utility>
 
-// Silence erroneous warnings from within Boost headers
-// that show up with gcc 8.1.
-// #pragma GCC diagnostic ignored "-Wparentheses"
-// This warning triggers with the assert(("explanation", check));
-// syntax since the left hand argument has no side-effects.
-// I prefer using the comma operator over && though because
-// the parentheses are more readable, so I'm silencing
-// the warning for this file.
-// #pragma GCC diagnostic ignored "-Wunused-value"
+#include <llvm/Support/CommandLine.h>
 
+#include <galois/AtomicHelpers.h>
 #include <galois/Galois.h>
 #include <galois/graphs/FileGraph.h>
 #include <galois/graphs/Graph.h>
 #include <galois/graphs/LCGraph.h>
 
-#include <galois/AtomicHelpers.h>
-
-// Vendored from an old version of LLVM for Lonestar app command line handling.
-#include "llvm/Support/CommandLine.h"
-
-#include "Lonestar/BoilerPlate.h"
-
 #ifdef GALOIS_ENABLE_VTUNE
 #include "galois/runtime/Profile.h"
 #endif
+
+#include "Lonestar/BoilerPlate.h"
 
 static char const* name = "Fast Marching Method";
 static char const* desc =
