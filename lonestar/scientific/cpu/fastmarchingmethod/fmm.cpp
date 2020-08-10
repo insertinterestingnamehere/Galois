@@ -166,8 +166,6 @@ static uint64_t nx, ny;
 static std::size_t NUM_CELLS;
 static data_t dx, dy;
 
-///////////////////////////////////////////////////////////////////////////////
-
 constexpr galois::MethodFlag no_lockable_flag = galois::MethodFlag::UNPROTECTED;
 
 static_assert(sizeof(std::atomic<std::size_t>) <= sizeof(double),
@@ -177,14 +175,14 @@ static_assert(std::is_trivial_v<std::atomic<std::size_t>> &&
                   std::is_standard_layout_v<std::atomic<std::size_t>>,
               "Current buffer allocation code assumes no special "
               "construction/deletion code is needed for atomic counters.");
-///////////////////////////////
 
 struct NodeData {
   double speed; // read only
   std::atomic<double> solution;
 };
 
-///////////////////////////////////////////////////////////////////////////////
+// These reference the input parameters as global data so they have to be
+// included after the input parameters are defined.
 
 #include "fastmarchingmethod.h"
 #include "structured/grids.h"
