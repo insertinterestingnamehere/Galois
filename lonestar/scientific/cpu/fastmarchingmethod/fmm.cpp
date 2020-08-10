@@ -182,30 +182,6 @@ static data_t dx, dy;
 
 constexpr galois::MethodFlag no_lockable_flag = galois::MethodFlag::UNPROTECTED;
 
-// TODO: In Galois, we need a graph type with dynamically sized
-// node/edge data for this problem. For now, indexing into a
-// separate data structure will have to be sufficient.
-
-// Note: I'm going to use a CSR graph, so each node will already have a
-// unique std::size_t id that can be used to index other data structures.
-// I'll also use a std::size_t cutoff to distinguish between ghost cells
-// that only exist to provide boundary condition data and actual cells.
-
-// Each edge holds the unit normal pointing outward
-// from the corresponding source cell in the graph.
-// Note: this will be the negative of the vector stored
-// on the edge coming the opposite direction.
-// Note: In the regular grid case, this could be considered redundant,
-// but this code hopefully will be adapted to handle irregular
-// geometry at some point.
-// Note: The sweeping direction for each direction along each edge
-// could just be pre-computed, but that'd noticeably increase
-// storage requirements.
-// TODO: Try caching sweep directions and see if it's any better.
-
-// Both these limitations could be lifted,
-// but in the interest of keeping the buffer management
-// code simple, I'm just going to assume them.
 static_assert(sizeof(std::atomic<std::size_t>) <= sizeof(double),
               "Current buffer allocation code assumes atomic "
               "counters smaller than sizeof(double).");
@@ -215,18 +191,10 @@ static_assert(std::is_trivial_v<std::atomic<std::size_t>> &&
               "construction/deletion code is needed for atomic counters.");
 ///////////////////////////////
 
-// FMM
-// enum Tag { KNOWN_FIX, KNOWN_OLD, KNOWN_NEW,
-//            BAND_OLD, BAND_NEW, FAR };
-enum Tag { KNOWN, BAND, FAR };
-
 struct NodeData {
   double speed; // read only
   std::atomic<double> solution;
 };
-
-// No fine-grained locks built into the graph.
-// Use atomics for ALL THE THINGS!
 
 ///////////////////////////////////////////////////////////////////////////////
 
