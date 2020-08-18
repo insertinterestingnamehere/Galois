@@ -358,6 +358,28 @@ class Solver {
     return sln;
   }
 
+  template <bool CONCURRENT, typename NodeData, typename It>
+  double solveQuadraticDebug(NodeData& my_data, It edge_begin, It) {
+    const auto f = my_data.speed;
+    assert(dx == dy);
+    auto h   = dx;
+    auto N   = graph.getEdgeDst(*edge_begin),
+         S   = graph.getEdgeDst(*(++edge_begin)),
+         E   = graph.getEdgeDst(*(++edge_begin)),
+         W   = graph.getEdgeDst(*(++edge_begin));
+    auto u_N = graph.getData(N).solution.load(std::memory_order_relaxed),
+         u_S = graph.getData(S).solution.load(std::memory_order_relaxed),
+         u_E = graph.getData(E).solution.load(std::memory_order_relaxed),
+         u_W = graph.getData(W).solution.load(std::memory_order_relaxed);
+    auto u_V = std::min(u_N, u_S), u_H = std::min(u_E, u_W);
+    if (std::isinf(u_H) || std::isinf(u_V) || std::abs(u_H - u_V) >= h / f) {
+      return std::min(u_H, u_V) + h / f;
+    }
+    return .5 * ((u_H + u_V) +
+                 std::sqrt((u_H + u_V) * (u_H + u_V) -
+                           2 * (u_H * u_H + u_V * u_V - h * h / (f * f))));
+  }
+
   ////////////////////////////////////////////////////////////////////////////////
 
   ////////////////////////////////////////////////////////////////////////////////
@@ -377,18 +399,23 @@ class Solver {
     emptyWork.reset();
     nonEmptyWork.reset();
 
+    /*auto PushOp = [&](const auto &item, auto &wl) noexcept {
+      auto [priority, node] = item;
+      assert(node < NUM_CELLS);
+      data_t current = graph.getData(node,
+      galois::MethodFlag::UNPROTECTED).solution.load(std::memory_order_relaxed);
+      if (current < priority) return;
+      for (auto e : graph.edges(node, no_lockable_flag) {
+        auto dst = graph.getEdgeDst(e);
+        if (dst >= NUM_CELLS) continue;
+        auto &dstData = graph;*/
+
     auto PushOp = [&](const auto& item, auto& wl) {
       using ItemTy = std::remove_cv_t<std::remove_reference_t<decltype(item)>>;
       // typename ItemTy::second_type node;
       // std::tie(std::ignore, node) = item;
       auto [old_sln, node] = item;
       assert(node < NUM_CELLS && "Ghost Point!");
-#ifndef NDEBUG
-      {
-        auto [i, j] = id2ij(node);
-        galois::gDebug("Pop ", old_sln, " - ", node, " (", i, " ", j, ")");
-      }
-#endif
       auto& curData      = graph.getData(node, galois::MethodFlag::UNPROTECTED);
       const data_t s_sln = curData.solution.load(std::memory_order_relaxed);
 
@@ -404,56 +431,29 @@ class Solver {
         if (dst >= NUM_CELLS)
           continue;
         auto& dstData = graph.getData(dst, no_lockable_flag);
-#ifndef NDEBUG
-        {
-          auto [i, j] = id2ij(dst);
-          galois::gDebug("Processing ", dst, " (", i, " ", j, ") ",
-                         dstData.solution.load(std::memory_order_relaxed));
-        }
-#endif
 
         // Given that the arrival time propagation is non-descending
-        if (dstData.solution.load(std::memory_order_relaxed) <= s_sln) {
+        data_t old_neighbor_val =
+            dstData.solution.load(std::memory_order_relaxed);
+        if (old_neighbor_val <= s_sln) {
           continue;
         }
 
         data_t sln_temp = solveQuadratic<CONCURRENT>(
             dstData, graph.edge_begin(dst, no_lockable_flag),
             graph.edge_end(dst, no_lockable_flag));
-#ifndef NDEBUG
-        {
-          auto [i, j] = id2ij(dst);
-          galois::gDebug("New val ", dst, " (", i, " ", j, ") ", sln_temp);
-        }
-#endif
-        if (data_t old_sln = galois::atomicMin(dstData.solution, sln_temp);
-            sln_temp < old_sln) {
-          // nonEmptyWork += 1;
-          if constexpr (CONCURRENT) {
-            wl.push(ItemTy{sln_temp, dst});
-          } else {
-#ifndef NDEBUG
-            {
-              galois::gDebug("-- update heap");
-              bool in_wl = false;
-              for (auto [_, n] : wl) {
-                auto [i, j] = id2ij(n);
-                galois::gDebug(_, " - ", n, " (", i, " ", j, ")");
-                if (n == dst) {
-                  in_wl = true;
-                  break;
-                }
-              }
-              if (in_wl)
-                galois::gDebug("repetitive item!");
-              galois::gDebug("-- updated heap");
-            }
-#endif
-            wl.push(ItemTy{sln_temp, dst}, old_sln);
-          }
+
+        do {
+          if (sln_temp >= old_neighbor_val)
+            goto continue_outer;
+        } while (!dstData.solution.compare_exchange_weak(
+            old_neighbor_val, sln_temp, std::memory_order_relaxed));
+        if constexpr (CONCURRENT) {
+          wl.push(ItemTy{sln_temp, dst});
         } else {
-          // emptyWork += 1;
+          wl.push(ItemTy{sln_temp, dst}, old_sln);
         }
+      continue_outer:;
       }
     };
 
@@ -561,6 +561,10 @@ class Solver {
           auto& my_data = graph.getData(node, no_lockable_flag);
           if (my_data.solution.load(std::memory_order_relaxed) == INF) {
             galois::gPrint("Untouched cell: ", node, "\n");
+          }
+          if (my_data.solution.load(std::memory_order_relaxed) == 0.) {
+            // Skip checking starting nodes.
+            return;
           }
           data_t new_val = solveQuadratic<false>(
               my_data, graph.edge_begin(node, no_lockable_flag),

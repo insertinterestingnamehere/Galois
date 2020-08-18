@@ -24,3 +24,7 @@
 #   message(WARNING "Cannot configure sweeps or other C++17 apps with a CMake version older than 3.8. Skipping.")
 # endif()
 
+app(fmm_structured fmm_structured.cpp)
+set_property(TARGET fmm_structured PROPERTY CXX_STANDARD 17)
+target_link_libraries(fmm_structured PRIVATE numpy-cpp)
+target_include_directories(fmm_structured PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/util")
