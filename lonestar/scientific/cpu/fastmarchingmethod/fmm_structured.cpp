@@ -172,14 +172,32 @@ int main(int argc, char** argv) {
     return {uN, uS, uE, uW};
   };
 
+  constexpr bool strict = false;
+
   float h                = h_input;
   auto difference_scheme = [&](double f, double h, double uH,
                                double uV) noexcept -> double {
-    double div = double(h) / double(f);
-    if (!std::isinf(uH) && !std::isinf(uV) && std::abs(uH - uV) < div) {
-      return .5 * (uH + uV +
-                   std::sqrt(((uH + uV) * (uH + uV) -
-                              2. * (uH * uH + uV * uV - div * div))));
+    double div = h / f, dif = uH - uV;
+    if (!std::isinf(uH) && !std::isinf(uV) && std::abs(dif) < div) {
+      // This variant of the differencing scheme is set up to avoid catastrophic
+      // cancellation. The resulting precision loss can cause violations of the
+      // nonincreasing property of the operator.
+      double current  = .5 * (uH + uV + std::sqrt(2 * div * div - dif * dif));
+      double previous = std::numeric_limits<double>::infinity();
+      if constexpr (strict) {
+        // Use Newton's method to further mitigate violation of the
+        // nonincreasing property caused by finite-precision arithmetic. This
+        // loop is likely to only take one or two iterations.
+        while (current < previous) {
+          previous = current;
+          current += .5 * ((div * div - (current - uH) * (current - uH) -
+                            (current - uV) * (current - uV)) /
+                           ((current - uH) + (current - uV)));
+        }
+        return current;
+      } else {
+        return current;
+      }
     }
     return std::min(uH, uV) + div;
   };
@@ -214,6 +232,9 @@ int main(int argc, char** argv) {
       galois::loopname("fmm"), galois::disable_conflict_detection(),
       galois::wl<OBIM>(indexer));
 
+  // Tolerance for non-strict differencing operator.
+  double constexpr tolerance = 1E-14;
+
   galois::do_all(
       galois::iterate(std::size_t(0u), nx * ny),
       [&](std::size_t id) noexcept {
@@ -225,9 +246,12 @@ int main(int argc, char** argv) {
         double const new_u = difference_scheme(f(i, j), h, uH, uV);
         double const old_u = u(i, j).load(std::memory_order_relaxed);
         if (new_u != old_u) {
-          std::cout << new_u << " " << old_u << " " << new_u - old_u
-                    << std::endl;
-          GALOIS_DIE("Failed correctness check");
+          if (strict ||
+              (std::abs(new_u - old_u) > tolerance * std::max(new_u, old_u))) {
+            std::cout << new_u << " " << old_u << " " << new_u - old_u
+                      << std::endl;
+            GALOIS_DIE("Failed correctness check");
+          }
         }
       },
       galois::loopname("Check correctness"));
