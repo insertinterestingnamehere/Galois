@@ -65,7 +65,7 @@ static llvm::cl::opt<unsigned> RF{"rf",
                                   llvm::cl::desc("round-off factor for OBIM"),
                                   llvm::cl::init(0u), llvm::cl::cat(catAlgo)};
 static llvm::cl::opt<double> tolerance("e", llvm::cl::desc("Final error bound"),
-                                       llvm::cl::init(2.e-6),
+                                       llvm::cl::init(1.e-14),
                                        llvm::cl::cat(catAlgo));
 
 static llvm::cl::OptionCategory catInput("2. Input Options");
@@ -293,73 +293,7 @@ class Solver {
   }
 
   template <bool CONCURRENT, typename NodeData, typename It>
-  double solveQuadratic(NodeData& my_data, It edge_begin, It edge_end) {
-    data_t sln         = my_data.solution.load(std::memory_order_relaxed);
-    const data_t speed = my_data.speed;
-
-    auto& sln_delta = *(local_pairs.getLocal());
-    sln_delta       = {std::make_pair(sln, dx), std::make_pair(sln, dy)};
-
-    int non_zero_counter = 0;
-    auto dir             = edge_begin;
-    for (auto& [s, d] : sln_delta) {
-      if (dir >= edge_end)
-        GALOIS_DIE("Dimension exceeded");
-
-      if (checkDirection(s, dir)) {
-        non_zero_counter++;
-      }
-      std::advance(dir, 2);
-    }
-    // local computation, nothing about graph
-    if (non_zero_counter == 0)
-      return sln;
-    galois::gDebug("solveQuadratic: #upwind_dirs: ", non_zero_counter);
-
-    std::sort(sln_delta.begin(), sln_delta.end(),
-              [&](std::pair<data_t, data_t>& a, std::pair<data_t, data_t>& b) {
-                return a.first < b.first;
-              });
-    auto p = sln_delta.begin();
-    data_t a(0.), b_(0.), c_(0.), f(1. / (speed * speed));
-    do {
-      const auto& [s, d] = *p++;
-      galois::gDebug(s, " ", d);
-      // Arrival time may be updated in previous rounds
-      // in which case remaining upwind dirs become invalid
-      if (sln < s)
-        break;
-
-      double temp = 1. / (d * d);
-      a += temp;
-      temp *= s;
-      b_ += temp;
-      temp *= s;
-      c_ += temp;
-      if (CONCURRENT || non_zero_counter == 1) {
-        data_t b = -2. * b_, c = c_ - f;
-        galois::gDebug("tabc: ", temp, " ", a, " ", b, " ", c);
-
-        double del = b * b - (4. * a * c);
-        galois::gDebug(a, " ", b, " ", c, " del=", del);
-        if (del >= 0) {
-          double new_sln = (-b + std::sqrt(del)) / (2. * a);
-          galois::gDebug("new solution: ", new_sln);
-          if constexpr (CONCURRENT) { // actually also apply to serial
-            if (new_sln > s) {        // conform causality
-              sln = std::min(sln, new_sln);
-            }
-          } else {
-            return new_sln;
-          }
-        }
-      }
-    } while (--non_zero_counter);
-    return sln;
-  }
-
-  template <bool CONCURRENT, typename NodeData, typename It>
-  double solveQuadraticDebug(NodeData& my_data, It edge_begin, It) {
+  data_t solveQuadratic(NodeData& my_data, It edge_begin, It) {
     const auto f = my_data.speed;
     assert(dx == dy);
     auto h   = dx;
@@ -372,12 +306,16 @@ class Solver {
          u_E = graph.getData(E).solution.load(std::memory_order_relaxed),
          u_W = graph.getData(W).solution.load(std::memory_order_relaxed);
     auto u_V = std::min(u_N, u_S), u_H = std::min(u_E, u_W);
-    if (std::isinf(u_H) || std::isinf(u_V) || std::abs(u_H - u_V) >= h / f) {
-      return std::min(u_H, u_V) + h / f;
+    data_t div = h / f;
+    if (std::isinf(u_H) || std::isinf(u_V) || std::abs(u_H - u_V) >= div) {
+      return std::min(u_H, u_V) + div;
     }
-    return .5 * ((u_H + u_V) +
-                 std::sqrt((u_H + u_V) * (u_H + u_V) -
-                           2 * (u_H * u_H + u_V * u_V - h * h / (f * f))));
+    // Use this particular form of the differencing scheme to mitigate
+    // precision loss from catastrophic cancellation inside the square root.
+    // The loss of precision breaks the monotonicity guarantees of the
+    // differencing operator. This mitigatest that issue somewhat.
+    data_t dif = u_H - u_V;
+    return .5 * (u_H + u_V + std::sqrt(2 * div * div - dif * dif));
   }
 
   ////////////////////////////////////////////////////////////////////////////////
@@ -571,7 +509,8 @@ class Solver {
               graph.edge_end(node, no_lockable_flag));
           if (data_t old_val = my_data.solution.load(std::memory_order_relaxed);
               new_val != old_val) {
-            data_t error = std::abs(new_val - old_val) / std::abs(old_val);
+            data_t error =
+                std::abs(new_val - old_val) / std::max(new_val, old_val);
             max_error.update(error);
             if (error > tolerance) {
               auto [x, y] = id2xy(node);
