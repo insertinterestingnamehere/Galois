@@ -47,7 +47,7 @@ static char const* url = "";
 
 #define DIM_LIMIT 2 // 2-D specific
 using data_t         = double;
-constexpr data_t INF = std::numeric_limits<data_t>::max();
+constexpr data_t INF = std::numeric_limits<data_t>::infinity();
 
 enum Algo { serial = 0, parallel };
 enum SourceType { scatter = 0, analytical };
@@ -102,6 +102,10 @@ static llvm::cl::opt<std::string>
 static llvm::cl::opt<std::string>
     output_npy("onpy", llvm::cl::desc("Export results to a npy format file"),
                llvm::cl::init(""), llvm::cl::cat(catOutput));
+static llvm::cl::opt<std::string> verify_npy(
+    "vnpy",
+    llvm::cl::desc("Canonical results for verification in a npy format file"),
+    llvm::cl::init(""), llvm::cl::cat(catOutput));
 
 static llvm::cl::OptionCategory catDisc("4. Discretization options");
 namespace internal {
@@ -290,6 +294,72 @@ class Solver {
     // check the other neighbor
     FindUpwind(dir);
     return upwind;
+  }
+
+  template <bool CONCURRENT, typename NodeData, typename It>
+  data_t solveQuadraticOld(NodeData& my_data, It edge_begin, It edge_end) {
+    data_t sln         = my_data.solution.load(std::memory_order_relaxed);
+    const data_t speed = my_data.speed;
+
+    auto& sln_delta = *(local_pairs.getLocal());
+    sln_delta       = {std::make_pair(sln, dx), std::make_pair(sln, dy)};
+
+    int non_zero_counter = 0;
+    auto dir             = edge_begin;
+    for (auto& [s, d] : sln_delta) {
+      if (dir >= edge_end)
+        GALOIS_DIE("Dimension exceeded");
+
+      if (checkDirection(s, dir)) {
+        non_zero_counter++;
+      }
+      std::advance(dir, 2);
+    }
+    // local computation, nothing about graph
+    if (non_zero_counter == 0)
+      return sln;
+    galois::gDebug("solveQuadratic: #upwind_dirs: ", non_zero_counter);
+
+    std::sort(sln_delta.begin(), sln_delta.end(),
+              [&](std::pair<data_t, data_t>& a, std::pair<data_t, data_t>& b) {
+                return a.first < b.first;
+              });
+    auto p = sln_delta.begin();
+    data_t a(0.), b_(0.), c_(0.), f(1. / (speed * speed));
+    do {
+      const auto& [s, d] = *p++;
+      galois::gDebug(s, " ", d);
+      // Arrival time may be updated in previous rounds
+      // in which case remaining upwind dirs become invalid
+      if (sln < s)
+        break;
+
+      double temp = 1. / (d * d);
+      a += temp;
+      temp *= s;
+      b_ += temp;
+      temp *= s;
+      c_ += temp;
+      if (CONCURRENT || non_zero_counter == 1) {
+        data_t b = -2. * b_, c = c_ - f;
+        galois::gDebug("tabc: ", temp, " ", a, " ", b, " ", c);
+
+        double del = b * b - (4. * a * c);
+        galois::gDebug(a, " ", b, " ", c, " del=", del);
+        if (del >= 0) {
+          double new_sln = (-b + std::sqrt(del)) / (2. * a);
+          galois::gDebug("new solution: ", new_sln);
+          if constexpr (CONCURRENT) { // actually also apply to serial
+            if (new_sln > s) {        // conform causality
+              sln = std::min(sln, new_sln);
+            }
+          } else {
+            return new_sln;
+          }
+        }
+      }
+    } while (--non_zero_counter);
+    return sln;
   }
 
   template <bool CONCURRENT, typename NodeData, typename It>
@@ -611,6 +681,45 @@ public:
     Tmain.stop();
 
     SanityCheck();
+
+    if (!verify_npy.empty()) {
+      cnpy::NpyArray npy = cnpy::npy_load(verify_npy);
+      float* npy_data    = npy.data<float>();
+
+      galois::GReduceMax<double> max_error;
+
+      galois::do_all(
+          galois::iterate(graph),
+          [&](GNode node) noexcept {
+            if (node >= NUM_CELLS)
+              return;
+
+            auto& my_data = graph.getData(node, no_lockable_flag);
+            if (my_data.solution.load(std::memory_order_relaxed) == INF) {
+              galois::gPrint("Untouched cell: ", node, "\n");
+            }
+            if (my_data.solution.load(std::memory_order_relaxed) == 0.) {
+              // Skip checking starting nodes.
+              return;
+            }
+            data_t new_val = npy_data[node];
+            if (data_t old_val =
+                    my_data.solution.load(std::memory_order_relaxed);
+                new_val != old_val) {
+              data_t error = std::abs(new_val - old_val) / std::abs(old_val);
+              max_error.update(error);
+              if (error > tolerance) {
+                auto [x, y] = id2xy(node);
+                galois::gPrint("Error bound violated at cell ", node, " (", x,
+                               " ", y, "): old_val=", old_val,
+                               " new_val=", new_val, " error=", error, "\n");
+              }
+            }
+          },
+          galois::no_stats(), galois::loopname("sanityCheckwithnpy"));
+
+      galois::gPrint("MAX ERROR (npy): ", max_error.reduce(), "\n");
+    }
 
     if (!output_npy.empty())
       DumpToNpy(graph);
