@@ -13,3 +13,7 @@ if (NOT TARGET numpy-cpp)
   # target_link_libraries(numpy-cpp PUBLIC galois_shmem)
   set_property(TARGET numpy-cpp APPEND PROPERTY COMPILE_FLAGS " -Wno-unused ")
 endif()
+
+app(grids_gen grids_gen.cpp)
+set_property(TARGET grids_gen PROPERTY CXX_STANDARD 17)
+
