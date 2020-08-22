@@ -67,10 +67,10 @@ void SetupGrids(Graph& graph) {
     segy_ptr->seek(read_traces);
     segy_ptr->read(trace);
     for (auto node : graph) {
-      if (node >= NUM_CELLS)
-        break;
       auto& curData    = graph.getData(node, galois::MethodFlag::UNPROTECTED);
       curData.solution = INF; // TODO ghost init?
+      if (node >= NUM_CELLS)
+        continue;
 
       auto [i, j] = id2ij(node);
       if (i != read_traces) {
@@ -108,11 +108,11 @@ void SetupGrids(Graph& graph) {
     ConstructCsrGrids(graph, std::array<std::size_t, 2>{x, y});
 
     for (auto node : graph) {
-      if (node >= NUM_CELLS)
-        break;
       auto& curData    = graph.getData(node, galois::MethodFlag::UNPROTECTED);
       curData.solution = INF; // TODO ghost init?
-      curData.speed    = npy_data[node] * .001;
+      if (node >= NUM_CELLS)
+        continue;
+      curData.speed = npy_data[node] * .001;
     }
   } else if (!input_csv.empty()) {
     std::ifstream incsv(input_csv);
