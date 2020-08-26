@@ -15,5 +15,6 @@ if (NOT TARGET numpy-cpp)
 endif()
 
 app(grids_gen grids_gen.cpp)
+target_include_directories(grids_gen PRIVATE ..)
 set_property(TARGET grids_gen PROPERTY CXX_STANDARD 17)
 

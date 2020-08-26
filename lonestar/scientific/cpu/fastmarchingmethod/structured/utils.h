@@ -41,7 +41,7 @@ size3d_t id2ijk(const GNode node) {
  * @return Coordinate tuple (x, y, z)
  */
 template <typename GNode>
-double3d_t id2xyz(const GNode node) {
+data3d_t id2xyz(const GNode node) {
   if (node >= NUM_CELLS)
     return {};
   auto res = std::lldiv(node, ny * nz);
@@ -64,7 +64,7 @@ double3d_t id2xyz(const GNode node) {
  * See id2xyz
  */
 template <typename GNode>
-GNode xyz2id(const double3d_t& coords) {
+GNode xyz2id(const data3d_t& coords) {
   uint64_t i = std::round((coords[2] - za) / dz - 1.);
   uint64_t j = std::round((coords[0] - xa) / dx - 1.);
   uint64_t k = std::round((coords[1] - ya) / dy - 1.);
@@ -92,24 +92,24 @@ inline std::size_t ij2id(const size2d_t ij) {
   return i * ny + j;
 }
 
-double2d_t id2xy(const std::size_t node) {
+data2d_t id2xy(const std::size_t node) {
   if (node >= NUM_CELLS)
     return {};
   auto res = std::lldiv(node, ny);
   double i = res.quot;
   double j = res.rem;
 
-  double x = xa + dx * (i + 1);
-  double y = ya + dy * (j + 1);
+  double x = xa + dx * i;
+  double y = ya + dy * j;
   // galois::gDebug(i, " ", j);
   // galois::gDebug(dx, " - ", dy);
-  assert(x < xb && y < yb);
-  return std::array<data_t, 2>({x, y});
+  assert(x <= xb && y <= yb);
+  return data2d_t({x, y});
 }
 
-std::size_t xy2id(const double2d_t& coords) {
-  uint64_t i = std::round((coords[0] - xa) / dx - 1.);
-  uint64_t j = std::round((coords[1] - ya) / dy - 1.);
+std::size_t xy2id(const data2d_t& coords) {
+  std::size_t i = std::round((coords[0] - xa) / dx);
+  std::size_t j = std::round((coords[1] - ya) / dy);
 
   return i * ny + j;
 }
