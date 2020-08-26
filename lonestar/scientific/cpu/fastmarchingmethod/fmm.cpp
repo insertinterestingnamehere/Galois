@@ -517,14 +517,15 @@ class Solver {
    */
   template <typename T>
   struct FileVerifier : Verifier {
-    cnpy::NpyArray npy;
-    std::unique_ptr<T[]> npy_data;
+    std::shared_ptr<T[]> npy_data;
 
-    explicit FileVerifier(std::string verify_npy)
-        : npy(cnpy::npy_load(verify_npy)) {
-      npy_data.reset(npy.data<T>());
+    explicit FileVerifier(std::string verify_npy) {
+      cnpy::NpyArray npy = cnpy::npy_load(verify_npy);
       GALOIS_ASSERT(npy.word_size == sizeof(T),
                     "wrong data type: should be float64/double");
+      npy_data = std::reinterpret_pointer_cast<T[]>(npy.data_holder);
+      GALOIS_ASSERT(npy_data,
+                    "Failed to load pre-stored results for verification!");
       galois::gPrint("Pre-stored results loaded for verification.\n");
     }
 
