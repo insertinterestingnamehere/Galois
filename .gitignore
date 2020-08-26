@@ -30,3 +30,6 @@ tags
 /python/galois.egg-info
 /python/galois/*.so
 /_skbuild
+
+# no NFS cache files
+.nfs[0-9]*
