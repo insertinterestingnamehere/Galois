@@ -159,11 +159,10 @@ static llvm::cl::opt<std::string> verify_npy(
 static llvm::cl::OptionCategory catDisc("4. Discretization options");
 static llvm::cl::opt<std::vector<double>, false,
                      NumVecParser<double, DIM_LIMIT>>
-    steps(
-        "h", llvm::cl::value_desc("dx,dy"),
-        llvm::cl::desc("Interval of each dimensions as a comma-separated array "
-                       "(support up to 2-D)"),
-        llvm::cl::init(std::vector<double>{1., 1.}), llvm::cl::cat(catDisc));
+    steps("h", llvm::cl::value_desc("dx,dy"),
+          llvm::cl::desc("Spacing between discrete samples of each dimensions; "
+                         "type as a comma-separated pair"),
+          llvm::cl::init(std::vector<double>{1., 1.}), llvm::cl::cat(catDisc));
 static llvm::cl::opt<std::vector<double>, false,
                      NumVecParser<double, DIM_LIMIT>>
     domain_start("oxy", llvm::cl::value_desc("x0,y0"),
@@ -190,12 +189,6 @@ struct NodeData {
   std::atomic<double> solution{INF};
 };
 
-// These reference the input parameters as global data so they have to be
-// included after the input parameters are defined.
-
-#include "structured/grids.h"
-#include "structured/utils.h"
-
 using Graph =
     galois::graphs::LC_CSR_Graph<NodeData, void>::with_no_lockable<true>::type;
 using GNode         = Graph::GraphNode;
@@ -205,6 +198,8 @@ using HeapTy        = FMMHeapWrapper<
     std::multimap<UpdateRequest::first_type, UpdateRequest::second_type>>;
 using WL = galois::InsertBag<UpdateRequest>;
 
+// These reference the input parameters as global data so they have to be
+// included after the input parameters are defined.
 #include "util/input.hh"
 #include "util/output.hh"
 

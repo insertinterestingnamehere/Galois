@@ -16,6 +16,9 @@
  * including but not limited to those resulting from defects in Software and/or
  * Documentation, or loss or inaccuracy of data of any kind.
  */
+#include "structured/grids.h"
+#include "structured/utils.h"
+
 void SetKnobs(const std::vector<std::size_t>& d) {
   assert(d.size() == DIM_LIMIT);
   nx = d[0];
