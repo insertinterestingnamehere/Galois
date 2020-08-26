@@ -101,7 +101,7 @@ void gFlush();
 //! Like assert but unconditionally executed
 #define GALOIS_ASSERT(cond, ...)                                               \
   do {                                                                         \
-    bool b = (cond);                                                           \
+    bool b = bool(cond);                                                       \
     if (!b) {                                                                  \
       galois::gError(__FILE__, ":", __LINE__, ": assertion failed: ", #cond,   \
                      " ", ##__VA_ARGS__);                                      \
