@@ -59,9 +59,9 @@ static llvm::cl::opt<Algo>
          llvm::cl::values(clEnumVal(serial, "serial heap implementation"),
                           clEnumVal(parallel, "parallel implementation")),
          llvm::cl::init(parallel), llvm::cl::cat(catAlgo));
-static llvm::cl::opt<unsigned> RF{"rf",
-                                  llvm::cl::desc("round-off factor for OBIM"),
-                                  llvm::cl::init(0u), llvm::cl::cat(catAlgo)};
+static llvm::cl::opt<double> RF{"rf",
+                                llvm::cl::desc("round-off factor for OBIM"),
+                                llvm::cl::init(1.), llvm::cl::cat(catAlgo)};
 static llvm::cl::opt<double> tolerance{"e", llvm::cl::desc("Final error bound"),
                                        llvm::cl::init(1.e-14),
                                        llvm::cl::cat(catAlgo)};
@@ -315,14 +315,16 @@ class Solver {
    * Quick update process. Hard code for all possible solutions.
    */
   template <bool CONCURRENT, typename NodeData, typename It>
-  data_t quickUpdate(NodeData& my_data, It edge_begin, It) {
+  data_t quickUpdate(NodeData& my_data, It edge_begin,
+                     [[maybe_unused]] It edge_end) {
     const auto f = my_data.speed;
     assert(dx == dy);
-    auto h   = dx;
-    auto N   = graph.getEdgeDst(*edge_begin),
-         S   = graph.getEdgeDst(*(++edge_begin)),
-         E   = graph.getEdgeDst(*(++edge_begin)),
-         W   = graph.getEdgeDst(*(++edge_begin));
+    auto h = dx;
+    auto N = graph.getEdgeDst(*edge_begin),
+         S = graph.getEdgeDst(*(++edge_begin)),
+         E = graph.getEdgeDst(*(++edge_begin)),
+         W = graph.getEdgeDst(*(++edge_begin));
+    assert(++edge_begin == edge_end);
     auto u_N = graph.getData(N).solution.load(std::memory_order_relaxed),
          u_S = graph.getData(S).solution.load(std::memory_order_relaxed),
          u_E = graph.getData(E).solution.load(std::memory_order_relaxed),
@@ -392,6 +394,7 @@ class Solver {
       // typename ItemTy::second_type node;
       // std::tie(std::ignore, node) = item;
       auto [old_sln, node] = item;
+      galois::gDebug(old_sln, " ", node);
       assert(node < NUM_CELLS && "Ghost Point!");
       auto& curData      = graph.getData(node, galois::MethodFlag::UNPROTECTED);
       const data_t s_sln = curData.solution.load(std::memory_order_relaxed);
@@ -437,8 +440,7 @@ class Solver {
         // galois::gDebug(item.first, "\t", t, "\n");
         return t;
       };
-      using PSchunk =
-          galois::worklists::PerSocketChunkLIFO<32>; // chunk size 16
+      using PSchunk = galois::worklists::PerSocketChunkLIFO<128>;
       using OBIM =
           galois::worklists::OrderedByIntegerMetric<decltype(Indexer), PSchunk>;
 #ifdef GALOIS_ENABLE_VTUNE
@@ -479,6 +481,7 @@ class Solver {
   }
 
   struct Verifier {
+    virtual ~Verifier() {}
     virtual data_t get(GNode) const                         = 0;
     virtual void alert(GNode, data_t, data_t, double) const = 0;
   };
@@ -492,6 +495,7 @@ class Solver {
     std::unique_ptr<Solver> p;
 
     explicit SelfVerifier(Solver* p_) : p(p_) {}
+    ~SelfVerifier() = default;
 
     data_t get(GNode node) const {
       return p->quickUpdate<true>(p->graph.getData(node, UNPROTECTED),
@@ -523,6 +527,7 @@ class Solver {
                     "Failed to load pre-stored results for verification!");
       galois::gPrint("Pre-stored results loaded for verification.\n");
     }
+    ~FileVerifier() = default;
 
     inline data_t get(GNode node) const { return npy_data[node]; }
 
