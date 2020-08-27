@@ -492,15 +492,15 @@ class Solver {
    * differences.
    */
   struct SelfVerifier : Verifier {
-    std::unique_ptr<Solver> p;
+    Solver& p;
 
-    explicit SelfVerifier(Solver* p_) : p(p_) {}
+    explicit SelfVerifier(Solver& p_) : p(p_) {}
     ~SelfVerifier() = default;
 
     data_t get(GNode node) const {
-      return p->quickUpdate<true>(p->graph.getData(node, UNPROTECTED),
-                                  p->graph.edge_begin(node, UNPROTECTED),
-                                  p->graph.edge_end(node, UNPROTECTED));
+      return p.quickUpdate<true>(p.graph.getData(node, UNPROTECTED),
+                                 p.graph.edge_begin(node, UNPROTECTED),
+                                 p.graph.edge_end(node, UNPROTECTED));
     }
 
     void alert(GNode node, data_t old_val, data_t new_val, double error) const {
@@ -652,7 +652,7 @@ public:
     if (!verify_npy.empty())
       verifier.reset(new FileVerifier<data_t>(verify_npy));
     else
-      verifier.reset(new SelfVerifier(this));
+      verifier.reset(new SelfVerifier(*this));
 
     galois::GReduceMax<double> max_error;
 
