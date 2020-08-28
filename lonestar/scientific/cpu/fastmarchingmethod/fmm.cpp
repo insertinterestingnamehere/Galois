@@ -440,7 +440,7 @@ class Solver {
         // galois::gDebug(item.first, "\t", t, "\n");
         return t;
       };
-      using PSchunk = galois::worklists::PerSocketChunkLIFO<128>;
+      using PSchunk = galois::worklists::PerSocketChunkFIFO<128>;
       using OBIM =
           galois::worklists::OrderedByIntegerMetric<decltype(Indexer), PSchunk>;
 #ifdef GALOIS_ENABLE_VTUNE
