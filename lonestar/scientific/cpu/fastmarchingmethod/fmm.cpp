@@ -47,17 +47,19 @@ static char const* url = "";
 #include "fastmarchingmethod.h"
 #define DIM_LIMIT 2 // 2-D specific
 
-enum Algo { serial = 0, parallel };
+enum Algo { serial = 0, parallel, fim };
 enum SourceType { scatter = 0, analytical };
 
-const char* const ALGO_NAMES[] = {"serial", "parallel"};
+const char* const ALGO_NAMES[] = {"serial", "parallel",
+                                  "Fast Iterative Method"};
 
 static llvm::cl::OptionCategory catAlgo("1. Algorithmic Options");
 static llvm::cl::opt<Algo>
     algo("algo", llvm::cl::value_desc("algo"),
          llvm::cl::desc("Choose an algorithm (default parallel):"),
          llvm::cl::values(clEnumVal(serial, "serial heap implementation"),
-                          clEnumVal(parallel, "parallel implementation")),
+                          clEnumVal(parallel, "parallel implementation"),
+                          clEnumVal(fim, "Fast Iterative Method")),
          llvm::cl::init(parallel), llvm::cl::cat(catAlgo));
 static llvm::cl::opt<double> RF{"rf",
                                 llvm::cl::desc("round-off factor for OBIM"),
@@ -480,6 +482,130 @@ class Solver {
     //                              nonEmptyWork.reduce());
   }
 
+  /**
+   * Core process: apply operators on active nodes.
+   */
+  template <bool CONCURRENT, typename WL, typename T = typename WL::value_type>
+  void FastIterativeMethod(WL* wl) {
+    galois::GAccumulator<std::size_t> emptyWork;
+    galois::GAccumulator<std::size_t> nonEmptyWork;
+    emptyWork.reset();
+    nonEmptyWork.reset();
+
+    // Jacobi iteration
+    WL* next = new WL(); // TODO memory leak!
+
+    auto PushOp = [&](const auto& item) {
+      using ItemTy = std::remove_cv_t<std::remove_reference_t<decltype(item)>>;
+      // typename ItemTy::second_type node;
+      // std::tie(std::ignore, node) = item;
+      auto [old_sln, node] = item;
+      galois::gDebug(old_sln, " ", node);
+      assert(node < NUM_CELLS && "Ghost Point!");
+      auto& curData      = graph.getData(node, galois::MethodFlag::UNPROTECTED);
+      const data_t s_sln = curData.solution.load(std::memory_order_relaxed);
+
+      // Ignore stale repetitive work items
+      if (s_sln < old_sln) {
+        return;
+      }
+
+      data_t new_val =
+          quickUpdate<CONCURRENT>(curData, graph.edge_begin(node, UNPROTECTED),
+                                  graph.edge_end(node, UNPROTECTED));
+      if (new_val != INF &&
+          std::abs(new_val - galois::atomicMin(curData.solution, new_val)) >=
+              tolerance) { // not converged
+        galois::gDebug("not converged:", new_val, " ", node);
+        pushWrap(*next, ItemTy{new_val, node}, old_sln);
+        return;
+      }
+
+      // UpdateNeighbors
+      for (auto e : graph.edges(node, UNPROTECTED)) {
+        GNode dst = graph.getEdgeDst(e);
+
+        if (dst >= NUM_CELLS)
+          continue;
+        auto& dstData = graph.getData(dst, UNPROTECTED);
+
+        // Given that the arrival time propagation is non-descending
+        data_t old_neighbor_val =
+            dstData.solution.load(std::memory_order_relaxed);
+        if (old_neighbor_val <= s_sln) {
+          continue;
+        }
+
+        data_t sln_temp =
+            quickUpdate<CONCURRENT>(dstData, graph.edge_begin(dst, UNPROTECTED),
+                                    graph.edge_end(dst, UNPROTECTED));
+
+        do {
+          if (sln_temp >= old_neighbor_val)
+            goto continue_outer;
+        } while (!dstData.solution.compare_exchange_weak(
+            old_neighbor_val, sln_temp, std::memory_order_relaxed));
+        assert(sln_temp < INF);
+        pushWrap(*next, ItemTy{sln_temp, dst}, old_neighbor_val);
+      continue_outer:;
+      }
+    };
+
+    //! Run algo
+    if constexpr (CONCURRENT) {
+      auto Indexer = [&](const T& item) {
+        unsigned t = std::round(item.first * RF);
+        // galois::gDebug(item.first, "\t", t, "\n");
+        return t;
+      };
+      using PSchunk = galois::worklists::PerSocketChunkFIFO<128>;
+      using OBIM =
+          galois::worklists::OrderedByIntegerMetric<decltype(Indexer), PSchunk>;
+
+      while (!wl->empty()) {
+#ifdef GALOIS_ENABLE_VTUNE
+        galois::runtime::profileVtune(
+            [&]() {
+#endif
+              galois::do_all(galois::iterate(wl->begin(), wl->end()), PushOp,
+                             galois::steal(),
+                             // galois::no_stats(),  // stat iterations
+                             galois::wl<OBIM>(Indexer),
+                             galois::loopname("FMM"));
+#ifdef GALOIS_ENABLE_VTUNE
+            },
+            "FMM_VTune");
+#endif
+        wl->clear();
+        std::swap(wl, next);
+      }
+    } else {
+      // TODO: not implemented yet!
+      /*
+      std::size_t num_iterations = 0;
+
+      while (!wl.empty()) {
+
+        PushOp(wl.pop(), wl);
+
+        num_iterations++;
+
+#ifndef NDEBUG
+        sleep(1); // Debug pause
+        galois::gDebug("\n********\n");
+#endif
+      }
+
+      galois::gPrint("#iterarions: ", num_iterations, "\n");
+      */
+    }
+
+    // galois::runtime::reportParam("Statistics", "EmptyWork",
+    // emptyWork.reduce()); galois::runtime::reportParam("Statistics",
+    // "NonEmptyWork",
+    //                              nonEmptyWork.reduce());
+  }
+
   struct Verifier {
     virtual ~Verifier() {}
     virtual data_t get(GNode) const                         = 0;
@@ -640,6 +766,52 @@ public:
   }
 
   /**
+   * Start interface.
+   */
+  template <bool CONCURRENT, typename WL>
+  void FIM() {
+    WL initBag;
+
+    using Loop = typename std::conditional<CONCURRENT, galois::DoAll,
+                                           galois::StdForEach>::type;
+    Loop loop;
+
+    loop(
+        galois::iterate(boundary.begin(), boundary.end()),
+        [&](GNode node) noexcept {
+          for (auto e : graph.edges(node, UNPROTECTED)) {
+            GNode dst = graph.getEdgeDst(e);
+            if (dst >= NUM_CELLS)
+              continue;
+            auto& dst_data =
+                graph.getData(dst, galois::MethodFlag::UNPROTECTED);
+            // will have duplicates but doesn't matter
+            pushWrap(initBag,
+                     {dst_data.solution.load(std::memory_order_relaxed), dst});
+          }
+        },
+        galois::loopname("FirstIteration"));
+
+    if (initBag.empty()) {
+      galois::gPrint("No cell other than boundary nodes to be processed.\n");
+      return;
+#ifndef NDEBUG // Print work items for the first round
+    } else {
+      galois::gDebug("vvvvvvvv init band vvvvvvvv");
+      for (auto [k, i] : initBag) {
+        auto [x, y] = id2xy(i);
+        galois::gDebug(k, " - ", i, " (", x, " ", y, "): arrival_time=",
+                       graph.getData(i, UNPROTECTED)
+                           .solution.load(std::memory_order_relaxed));
+      }
+      galois::gDebug("^^^^^^^^ init band ^^^^^^^^");
+#endif
+    }
+
+    FastIterativeMethod<CONCURRENT>(&initBag);
+  }
+
+  /**
    * Verify results.
    */
   void sanityCheck() {
@@ -721,6 +893,9 @@ int main(int argc, char** argv) noexcept {
     break;
   case parallel:
     solver.runAlgo<true, WL>();
+    break;
+  case fim:
+    solver.FIM<true, WL>();
     break;
   default:
     std::abort();
