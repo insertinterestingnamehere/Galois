@@ -31,36 +31,31 @@ static llvm::cl::opt<std::string> filename(llvm::cl::Positional,
 static llvm::cl::opt<unsigned long long> nh{
     "nh", llvm::cl::desc("number of cells in ALL direction"),
     llvm::cl::init(0u)};
-static llvm::cl::opt<unsigned long long> _nx{
+static llvm::cl::opt<unsigned long long> nx{
     "nx", llvm::cl::desc("number of cells in x direction"),
     llvm::cl::init(10u)};
-static llvm::cl::opt<unsigned long long> _ny{
+static llvm::cl::opt<unsigned long long> ny{
     "ny", llvm::cl::desc("number of cells in y direction"),
     llvm::cl::init(10u)};
-static llvm::cl::opt<unsigned long long> _nz{
-    "nz", llvm::cl::desc("number of cells in z direction"),
-    llvm::cl::init(10u)};
-static std::size_t nx, ny, nz;
+static llvm::cl::opt<unsigned long long> nz{
+    "nz", llvm::cl::desc("number of cells in z direction"), llvm::cl::init(0u)};
 void global_config() {
   // configure global variables
   if (nh)
-    nx = ny = nz = nh;
-  else {
-    nx = _nx;
-    ny = _ny;
-    nz = _nz;
-  }
-  galois::gDebug(nx, " - ", ny, " - ", nz);
+    nx = ny = nz = nh.getValue();
+  galois::gPrint(nx, " - ", ny, " - ", nz);
 }
 
 #include "structured/grids.h"
 
-// ConstructCsrGrids<void>(nx, ny, nz);
 int main(int argc, char** argv) noexcept {
   galois::SharedMemSys galois_system;
   LonestarStart(argc, argv, name, desc, url, nullptr);
 
   global_config();
-  ConstructCsrGrids<void>(filename, nx, ny, nz);
+  if (nz)
+    ConstructCsrGrids<3, void>(filename, {nx, ny});
+  else
+    ConstructCsrGrids<2, void>(filename, {nx, ny});
   return 0;
 }

@@ -273,11 +273,11 @@ auto ConstructCsrGrids(Graph& built_graph,
 }
 
 // Generate and save to file.
-template <typename edge_data_type>
-void ConstructCsrGrids(std::string filename, std::size_t nx, std::size_t ny,
-                       std::size_t nz) noexcept {
+template <std::size_t D, typename edge_data_type>
+void ConstructCsrGrids(std::string filename,
+                       std::array<std::size_t, D> dims) noexcept {
+  static_assert(D == 2 || D == 3, "Only support 2-D or 3-D for now.");
   galois::graphs::FileGraphWriter temp_graph;
-  WriteCsrGrids<edge_data_type>(temp_graph,
-                                std::array<std::size_t, 3>{nx, ny, nz});
+  WriteCsrGrids<edge_data_type>(temp_graph, dims);
   temp_graph.toFile(filename);
 }
