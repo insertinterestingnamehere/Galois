@@ -79,28 +79,28 @@ GNode xyz2id(const data3d_t& coords) {
 size2d_t id2ij(const std::size_t node) {
   if (node >= NUM_CELLS)
     return {};
-  auto res      = std::lldiv(node, ny);
+  auto res      = std::lldiv(node, nx);
   std::size_t i = res.quot;
   std::size_t j = res.rem;
 
-  assert(i < nx && j < ny);
+  assert(i < ny && j < nx);
   return std::array<std::size_t, 2>({i, j});
 }
 
 inline std::size_t ij2id(const size2d_t ij) {
   auto [i, j] = ij;
-  return i * ny + j;
+  return i * nx + j;
 }
 
 data2d_t id2xy(const std::size_t node) {
   if (node >= NUM_CELLS)
     return {};
-  auto res = std::lldiv(node, ny);
+  auto res = std::lldiv(node, nx);
   double i = res.quot;
   double j = res.rem;
 
-  double x = xa + dx * i;
-  double y = ya + dy * j;
+  double y = ya + dy * i;
+  double x = xa + dx * j;
   // galois::gDebug(i, " ", j);
   // galois::gDebug(dx, " - ", dy);
   assert(x <= xb && y <= yb);
@@ -108,8 +108,8 @@ data2d_t id2xy(const std::size_t node) {
 }
 
 std::size_t xy2id(const data2d_t& coords) {
-  std::size_t i = std::round((coords[0] - xa) / dx);
-  std::size_t j = std::round((coords[1] - ya) / dy);
+  std::size_t i = std::round((coords[0] - ya) / dy);
+  std::size_t j = std::round((coords[1] - xa) / dx);
 
-  return i * ny + j;
+  return i * nx + j;
 }
