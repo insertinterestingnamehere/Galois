@@ -52,6 +52,7 @@ struct FMMHeapWrapper {
   inline auto end() { return wl.end(); }
 
   inline bool empty() { return wl.empty(); }
+  inline void clear() { wl.clear(); }
 
   void push(const value_type& p, const key_type& old_sln = 0) {
     auto [sln_temp, dst] = p;
