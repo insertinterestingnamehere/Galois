@@ -34,13 +34,13 @@ void SetKnobs(const std::vector<std::size_t>& d) {
   xb = xa + dx * data_t(nx - 1);
   yb = ya + dy * data_t(ny - 1);
 
-  if (!RF)
-    RF = 1 / std::min({dx, dy, 1.}, std::less<data_t>{});
+  if (!rounding_scale)
+    rounding_scale = 1 / std::min({dx, dy, 1.}, std::less<data_t>{});
 
   galois::gPrint("Domain shape: ", nx, " x ", ny, "\n");
   galois::gPrint("Unit size: ", dx, " x ", dy, "\n");
   galois::gPrint("Space range: [", xa, ", ", xb, "] x [", ya, ", ", yb, "]\n");
-  galois::gPrint("RF: ", RF, "\n");
+  galois::gPrint("rounding_scale: ", rounding_scale, "\n");
 }
 
 #include "google-segystack/segy_file.h"
@@ -86,7 +86,7 @@ void fromNpy(Graph& graph) {
   GALOIS_ASSERT(npy.word_size == sizeof(float) && "wrong data type");
   assert(npy.shape.size() == 2 && "Data map should be 2-D");
   // Obtain shape info
-  std::size_t x = npy.shape[0], y = npy.shape[1];
+  std::size_t y = npy.shape[0], x = npy.shape[1]; // convert ij to xy
 
   SetKnobs({x, y});
 
