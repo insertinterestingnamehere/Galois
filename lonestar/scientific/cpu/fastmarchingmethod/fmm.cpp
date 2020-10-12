@@ -103,6 +103,10 @@ static llvm::cl::opt<std::string> input_csv(
         "Use csv file as input speed map. NOTE: Current implementation "
         "requires explicit definition of the size on each dimensions"),
     llvm::cl::init(""), llvm::cl::cat(catInput));
+static llvm::cl::opt<std::string> verify_npy(
+    "vnpy",
+    llvm::cl::desc("Canonical results for verification in a npy format file"),
+    llvm::cl::init(""), llvm::cl::cat(catInput));
 namespace internal {
 template <typename T>
 struct StrConv;
@@ -165,10 +169,6 @@ static llvm::cl::opt<std::string>
 static llvm::cl::opt<std::string>
     output_npy("onpy", llvm::cl::desc("Export results to a npy format file"),
                llvm::cl::init(""), llvm::cl::cat(catOutput));
-static llvm::cl::opt<std::string> verify_npy(
-    "vnpy",
-    llvm::cl::desc("Canonical results for verification in a npy format file"),
-    llvm::cl::init(""), llvm::cl::cat(catOutput));
 
 static llvm::cl::OptionCategory catDisc("4. Discretization options");
 static llvm::cl::opt<std::vector<double>, false,
@@ -1120,7 +1120,7 @@ class FastIterativeMethod : public LayoutTy {};
 template <bool CONCURRENT, typename WorkListTy>
 class FastIterativeMethod<DenseSolver, CONCURRENT, WorkListTy>
     : public DenseSolver {
-  void exec(WorkListTy* wl);
+  void exec(std::unique_ptr<WorkListTy>& wl);
 
 public:
   template <typename... Args>
@@ -1128,24 +1128,24 @@ public:
       : DenseSolver(std::forward<Args>(args)...) {}
 
   void runAlgo() {
-    WorkListTy initial;
+    std::unique_ptr<WorkListTy> initial(new WorkListTy());
 
     if (source_i)
-      initial.push(UpdateRequest{0., ravel_index(source_i - 1, source_j)});
+      initial->push(UpdateRequest{0., ravel_index(source_i - 1, source_j)});
     if (source_i < ny - 1)
-      initial.push(UpdateRequest{0., ravel_index(source_i + 1, source_j)});
+      initial->push(UpdateRequest{0., ravel_index(source_i + 1, source_j)});
     if (source_j)
-      initial.push(UpdateRequest{0., ravel_index(source_i, source_j - 1)});
+      initial->push(UpdateRequest{0., ravel_index(source_i, source_j - 1)});
     if (source_j < nx - 1)
-      initial.push(UpdateRequest{0., ravel_index(source_i, source_j + 1)});
+      initial->push(UpdateRequest{0., ravel_index(source_i, source_j + 1)});
 
-    if (initial.empty()) {
+    if (initial->empty()) {
       galois::gPrint("No cell other than boundary nodes to be processed.\n");
       return;
 #ifndef NDEBUG // Print work items for the first round
     } else {
       galois::gDebug("vvvvvvvv init band vvvvvvvv");
-      for (auto [k, id] : initial) {
+      for (auto [k, id] : *initial) {
         auto const [i, j] = unravel_index(id);
         galois::gDebug(k, " - ", id, " (", i, " ", j, "): arrival_time=",
                        u(i, j).load(std::memory_order_relaxed));
@@ -1154,17 +1154,17 @@ public:
 #endif
     }
 
-    exec(&initial);
+    exec(initial);
   }
 };
 
 template <>
-void FastIterativeMethod<DenseSolver, true, WL>::exec(WL* wl) {
+void FastIterativeMethod<DenseSolver, true, WL>::exec(std::unique_ptr<WL>& wl) {
   galois::GAccumulator<std::size_t> badWork;
   badWork.reset();
 
   // Jacobi iteration
-  WL* next = new WL();
+  std::unique_ptr<WL> next(new WL());
 
   //! Run algo
   std::size_t round = 0;
@@ -1232,10 +1232,8 @@ void FastIterativeMethod<DenseSolver, true, WL>::exec(WL* wl) {
         "FIM_VTune");
 #endif
     wl->clear();
-    std::swap(wl, next);
+    wl.swap(next);
   }
-
-  delete next;
 
   galois::runtime::reportStat_Single("DenseFSM", "Rounds", round);
 
