@@ -16,12 +16,15 @@
  * including but not limited to those resulting from defects in Software and/or
  * Documentation, or loss or inaccuracy of data of any kind.
  */
+using data_t = double;
+#include <limits>
+constexpr data_t INF = std::numeric_limits<data_t>::infinity();
 
 #include <array>
-using double2d_t = std::array<double, 2>;
-using double3d_t = std::array<double, 3>;
-using size2d_t   = std::array<std::size_t, 2>;
-using size3d_t   = std::array<std::size_t, 3>;
+using data2d_t = std::array<data_t, 2>;
+using data3d_t = std::array<data_t, 3>;
+using size2d_t = std::array<std::size_t, 2>;
+using size3d_t = std::array<std::size_t, 3>;
 
 // Idk why this hasn't been standardized in C++ yet, but here it is.
 static constexpr double PI =

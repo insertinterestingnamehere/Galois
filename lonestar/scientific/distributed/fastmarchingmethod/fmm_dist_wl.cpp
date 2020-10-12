@@ -41,9 +41,8 @@ constexpr static char const* desc =
 constexpr static char const* url         = "";
 constexpr static char const* REGION_NAME = "FMM";
 
+#include "fastmarchingmethod.h"
 #define DIM_LIMIT 2 // 2-D specific
-using data_t         = double;
-constexpr data_t INF = std::numeric_limits<data_t>::infinity();
 
 enum Algo { serial = 0, parallel };
 enum SourceType { scatter = 0, analytical };
@@ -57,12 +56,18 @@ static llvm::cl::opt<Algo>
          llvm::cl::values(clEnumVal(serial, "serial heap implementation"),
                           clEnumVal(parallel, "parallel implementation")),
          llvm::cl::init(parallel), llvm::cl::cat(catAlgo));
-static llvm::cl::opt<unsigned> RF{"rf",
-                                  llvm::cl::desc("round-off factor for OBIM"),
-                                  llvm::cl::init(0u), llvm::cl::cat(catAlgo)};
-static llvm::cl::opt<double> tolerance("e", llvm::cl::desc("Final error bound"),
-                                       llvm::cl::init(2.e-6),
-                                       llvm::cl::cat(catAlgo));
+static llvm::cl::opt<double> rounding_scale{
+    "rf", llvm::cl::desc("round-off factor for OBIM"), llvm::cl::init(1.),
+    llvm::cl::cat(catAlgo)};
+static llvm::cl::opt<double> tolerance{
+    "e",
+    llvm::cl::desc("Final error bound for non-strict differencing operator"),
+    llvm::cl::init(1.e-14), llvm::cl::cat(catAlgo)};
+static llvm::cl::opt<bool> strict{
+    "strict",
+    llvm::cl::desc(
+        "Force non-increasing update to mitigate catastrophic cancellation"),
+    llvm::cl::cat(catAlgo)};
 
 static llvm::cl::OptionCategory catInput("2. Input Options");
 static llvm::cl::opt<SourceType> source_type(
@@ -87,19 +92,10 @@ static llvm::cl::opt<std::string> input_csv(
         "Use csv file as input speed map. NOTE: Current implementation "
         "requires explicit definition of the size on each dimensions (see -d)"),
     llvm::cl::init(""), llvm::cl::cat(catInput));
-// TODO parameterize the following
-static data_t xa = -.5, xb = .5;
-static data_t ya = -.5, yb = .5;
-
-static llvm::cl::OptionCategory catOutput("3. Output Options");
-static llvm::cl::opt<std::string>
-    output_csv("ocsv", llvm::cl::desc("Export results to a csv format file"),
-               llvm::cl::init(""), llvm::cl::cat(catOutput));
-static llvm::cl::opt<std::string>
-    output_npy("onpy", llvm::cl::desc("Export results to a npy format file"),
-               llvm::cl::init(""), llvm::cl::cat(catOutput));
-
-static llvm::cl::OptionCategory catDisc("4. Discretization options");
+static llvm::cl::opt<std::string> verify_npy(
+    "vnpy",
+    llvm::cl::desc("Canonical results for verification in a npy format file"),
+    llvm::cl::init(""), llvm::cl::cat(catInput));
 namespace internal {
 template <typename T>
 struct StrConv;
@@ -116,7 +112,7 @@ struct StrConv<double> {
   }
 };
 } // namespace internal
-template <typename NumTy, int MAX_SIZE = 0>
+template <typename NumTy, int FIXED_SIZE = 0>
 struct NumVecParser : public llvm::cl::parser<std::vector<NumTy>> {
   template <typename... Args>
   NumVecParser(Args&... args) : llvm::cl::parser<std::vector<NumTy>>(args...) {}
@@ -137,35 +133,51 @@ struct NumVecParser : public llvm::cl::parser<std::vector<NumTy>> {
     if (*end != '\0')
       return O.error("Invalid option value '" + ArgName + "=" + ArgValue +
                      "': should be comma-separated unsigned integers");
-    if (MAX_SIZE && Val.size() > MAX_SIZE)
-      return O.error(ArgName + "=" + ArgValue + ": expect no more than " +
-                     std::to_string(MAX_SIZE) + " numbers but get " +
+    if (FIXED_SIZE && Val.size() != FIXED_SIZE)
+      return O.error(ArgName + "=" + ArgValue + ": expect " +
+                     std::to_string(FIXED_SIZE) + " numbers but get " +
                      std::to_string(Val.size()));
     return false;
   }
 };
 static llvm::cl::opt<std::vector<std::size_t>, false,
                      NumVecParser<std::size_t, DIM_LIMIT>>
-    dims("d", llvm::cl::value_desc("d1,d2"),
-         llvm::cl::desc("Size of each dimensions as a comma-separated array "
-                        "(support up to 2-D)"),
-         llvm::cl::cat(catDisc));
+    domain_shape(
+        "ij", llvm::cl::value_desc("nrows,ncols"),
+        llvm::cl::desc("Size of each dimensions as a comma-separated array "
+                       "(support up to 2-D)"),
+        llvm::cl::cat(catInput));
+static llvm::cl::opt<double> speed_factor{
+    "sf", llvm::cl::desc("speed factor multiplied to speed value"),
+    llvm::cl::init(1.), llvm::cl::cat(catInput)};
+
+static llvm::cl::OptionCategory catOutput("3. Output Options");
+static llvm::cl::opt<std::string>
+    output_csv("ocsv", llvm::cl::desc("Export results to a csv format file"),
+               llvm::cl::init(""), llvm::cl::cat(catOutput));
+static llvm::cl::opt<std::string>
+    output_npy("onpy", llvm::cl::desc("Export results to a npy format file"),
+               llvm::cl::init(""), llvm::cl::cat(catOutput));
+
+static llvm::cl::OptionCategory catDisc("4. Discretization options");
 static llvm::cl::opt<std::vector<double>, false,
                      NumVecParser<double, DIM_LIMIT>>
-    intervals(
-        "dx", llvm::cl::value_desc("dx,dy"),
-        llvm::cl::desc("Interval of each dimensions as a comma-separated array "
-                       "(support up to 2-D)"),
-        llvm::cl::init(std::vector<double>{1., 1.}), llvm::cl::cat(catDisc));
+    steps("h", llvm::cl::value_desc("dx,dy"),
+          llvm::cl::desc("Spacing between discrete samples of each dimensions; "
+                         "type as a comma-separated pair"),
+          llvm::cl::init(std::vector<double>{1., 1.}), llvm::cl::cat(catDisc));
+static llvm::cl::opt<std::vector<double>, false,
+                     NumVecParser<double, DIM_LIMIT>>
+    domain_start("oxy", llvm::cl::value_desc("x0,y0"),
+                 llvm::cl::desc("Coordinate of cell [0, 0] "
+                                "<comma-separated array, default (0., 0.)>"),
+                 llvm::cl::init(std::vector<double>{0., 0.}),
+                 llvm::cl::cat(catDisc));
 
-static uint64_t nx, ny;
-static std::size_t NUM_CELLS;
-static data_t dx, dy;
-#include "distributed/DgIO.h"
+static std::size_t nx, ny, NUM_CELLS;
+static data_t dx, dy, xa, xb, ya, yb;
 
 ///////////////////////////////////////////////////////////////////////////////
-
-#include "fastmarchingmethod.h"
 
 // No fine-grained locks built into the graph.
 // Use atomics for ALL THE THINGS!
@@ -187,17 +199,15 @@ using UpdateRequest = std::pair<data_t, GNode>;
 using WL            = galois::InsertBag<UpdateRequest>;
 std::unique_ptr<WL> initBag;
 
+#include "distributed/DgIO.h"
 #include "distributed/fmm_sync.h"
-#include "structured/grids.h"
-#include "structured/utils.h"
 
 #include "util/input.hh"
 
 template <typename Graph, typename BL,
           typename GNode = typename Graph::GraphNode,
           typename T     = typename BL::value_type>
-void AssignBoundary(Graph& graph, BL& boundary) {
-
+void assignBoundary(Graph& graph, BL& boundary) {
   if (source_type == scatter) {
     GNode g_n = xy2id({0., 0.});
     if (graph.isLocal(g_n))
@@ -213,11 +223,11 @@ void AssignBoundary(Graph& graph, BL& boundary) {
             return;
 
           auto [x, y] = id2xy(graph.getGID(node));
-          if (NonNegativeRegion(double2d_t{x, y})) {
-            if (!NonNegativeRegion(double2d_t{x + dx, y}) ||
-                !NonNegativeRegion(double2d_t{x - dx, y}) ||
-                !NonNegativeRegion(double2d_t{x, y + dy}) ||
-                !NonNegativeRegion(double2d_t{x, y - dy})) {
+          if (NonNegativeRegion(data2d_t{x, y})) {
+            if (!NonNegativeRegion(data2d_t{x + dx, y}) ||
+                !NonNegativeRegion(data2d_t{x - dx, y}) ||
+                !NonNegativeRegion(data2d_t{x, y + dy}) ||
+                !NonNegativeRegion(data2d_t{x, y - dy})) {
               boundary.push(node);
             }
           }
@@ -247,19 +257,92 @@ static void initCells(Graph& graph) {
           syncSubstrate->get_run_identifier("initializeCells").c_str()));
 }
 
-static void initBoundary(Graph& graph, BL& boundary) {
-  galois::do_all(
-      galois::iterate(boundary.begin(), boundary.end()),
-      [&](GNode b) noexcept {
-        auto& boundary_data    = graph.getData(b);
-        boundary_data.solution = BoundaryCondition(id2xy(graph.getGID(b)));
-      },
-      galois::no_stats(),
-      galois::loopname(
-          syncSubstrate->get_run_identifier("initializeBoundary").c_str()));
+static void initBoundary(Graph& graph, BL& local_boundary) {
+  galois::DGAccumulator<uint32_t> busy;
+  busy.reset();
+  if (!local_boundary.empty()) {
+    busy += 1;
+#ifndef NDEBUG
+    // print local_boundary
+    for (GNode b : local_boundary) {
+      auto [ii, jj] = id2ij(graph.getGID(b));
+      DGDEBUG("local_boundary: ", b, "(g", graph.getGID(b),
+              (b < graph.numMasters() ? "M" : "m"), ") (", ii, " ", jj,
+              ") with ", graph.getData(b).solution);
+    }
+#endif
+    galois::do_all(
+        galois::iterate(local_boundary.begin(), local_boundary.end()),
+        [&](GNode b) noexcept {
+          auto& boundary_data    = graph.getData(b);
+          boundary_data.solution = BoundaryCondition(id2xy(graph.getGID(b)));
+        },
+        galois::no_stats(),
+        galois::loopname(
+            syncSubstrate->get_run_identifier("initializeBoundary").c_str()));
+  } else {
+    DGDEBUG("No local_boundary element");
+  }
+  assert(busy.reduce() && "Boundary not defined!");
 }
 
 ////////////////////////////////////////////////////////////////////////////////
+
+template <typename NodeData>
+data_t quickUpdate(NodeData& my_data) {
+  const auto f = my_data.speed;
+  assert(dx == dy);
+  auto h = dx;
+  /*
+   * General form of the differencing scheme on uniform grids (same spacing h
+   * for all dimensions):
+   *
+   * Sigma<i=1...N>( (t-t_i)^2 ) = (h / f)^2
+   *
+   * t: arrival time (to be solved)
+   * h: unit step
+   * f: speed
+   *
+   * Particular solutions:
+   *
+   * 1st order:
+   * m0 = h / f
+   * t = t_1 + m0
+   *
+   * 2nd order:
+   * m1 = sqrt2 * m0
+   * m2 = t-1 - t_2
+   * t = (t_1 + t_2 + sqrt{(m1 + m2) * (m1 - m2)}) / 2
+   *
+   * Particular solutions for non-uniform grids:
+   *
+   * 1st order:
+   * t = t_1 + h_1 / f
+   *
+   * 2nd order:
+   * m0 = h_1^2 + h_2^2
+   * m1 = m0 / f^2
+   * m2 = t_1 - t_2
+   * p0 = h_1 / m0
+   * p1 = h_1 * p0
+   * p12 = h_2 * p0
+   * p2 = h_2 * h_2 / m0
+   * t = p2 * t_1 + p1 * t_2 + p3 * sqrt{m1 - m2^2}
+   */
+  data_t u_V = my_data.upwind_solution[0];
+  data_t u_H = my_data.upwind_solution[1];
+  data_t div = h / f;
+  if (std::isinf(u_H) || std::isinf(u_V) || std::abs(u_H - u_V) >= div) {
+    return std::min(u_H, u_V) + div;
+  }
+  // Use this particular form of the differencing scheme to mitigate
+  // precision loss from catastrophic cancellation inside the square root.
+  // The loss of precision breaks the monotonicity guarantees of the
+  // differencing operator. This mitigatest that issue somewhat.
+  static double sqrt2 = std::sqrt(2);
+  data_t s2div = sqrt2 * div, dif = u_H - u_V;
+  return .5 * (u_H + u_V + std::sqrt((s2div + dif) * (s2div - dif)));
+}
 
 template <typename Graph, typename It = typename Graph::edge_iterator,
           typename UserContext>
@@ -278,8 +361,8 @@ bool pushUpdate(Graph& graph, const data_t& up_sln, It dir, UserContext& wl) {
       if (auto& us = dst_data.upwind_solution[i];
           up_sln < galois::atomicMin(us, up_sln)) {
         bitset_upwind_solution.set(dst);
-        didWork |= true;
         wl.push(UpdateRequest{up_sln, dst});
+        didWork = true;
       }
 #ifndef NDEBUG
       if (dst == 1104) {
@@ -369,19 +452,19 @@ static void FirstIteration(Graph& graph, BL& boundary) {
   galois::do_all(
       galois::iterate(boundary.begin(), boundary.end()),
       [&](GNode b) noexcept {
-        if (graph.getGID(b) >= NUM_CELLS)
-          return;
-        auto dir = graph.edge_begin(b);
-        if (dir >= graph.edge_end(b))
-          return;
-        auto& b_data = graph.getData(b);
+        if (graph.getGID(b) < NUM_CELLS) {
+          auto& b_data = graph.getData(b);
 #ifndef NDEBUG
-        auto [i, j] = id2ij(graph.getGID(b));
-        DGDEBUG("FirstItr: ", b, " (g", graph.getGID(b),
-                (b < graph.numMasters() ? "M" : "m"), ") (", i, " ", j,
-                ") sln:", b_data.solution);
+          auto [i, j] = id2ij(graph.getGID(b));
+          DGDEBUG("FirstItr: ", b, " (g", graph.getGID(b),
+                  (b < graph.numMasters() ? "M" : "m"), ") (", i, " ", j,
+                  ") sln:", b_data.solution);
 #endif
-        pushUpdate(graph, b_data.solution, dir, *initBag);
+          auto dir = graph.edge_begin(b);
+          if (dir >= graph.edge_end(b))
+            return;
+          pushUpdate(graph, b_data.solution, dir, *initBag);
+        }
       },
       galois::loopname("FirstIteration"));
 
@@ -397,11 +480,11 @@ static void FirstIteration(Graph& graph, BL& boundary) {
 
 void FastMarching(Graph& graph) {
   auto Indexer = [&](const UpdateRequest& item) {
-    unsigned t = std::round(item.first * RF);
+    unsigned t = std::round(item.first * rounding_scale);
     // galois::gDebug(item.first, "\t", t, "\n");
     return t;
   };
-  using PSchunk = galois::worklists::PerSocketChunkLIFO<32>; // chunk size 16
+  using PSchunk = galois::worklists::PerSocketChunkLIFO<128>; // chunk size 16
   using OBIM =
       galois::worklists::OrderedByIntegerMetric<decltype(Indexer), PSchunk>;
 
@@ -410,7 +493,6 @@ void FastMarching(Graph& graph) {
   unsigned _round_counter = 0;
 
   // const auto& nodes_with_edges = graph.allNodesWithEdgesRange();
-  // const auto& all_nodes = graph.allNodesRange();
 
 #ifdef GALOIS_ENABLE_VTUNE
   galois::runtime::profileVtune(
@@ -432,13 +514,13 @@ void FastMarching(Graph& graph) {
           syncSubstrate->set_num_round(_round_counter);
           more_work.reset();
           galois::for_each(
-              galois::iterate((*initBag).begin(), (*initBag).end()),
+              galois::iterate(*initBag),
               [&](const UpdateRequest& item, auto& wl) {
                 auto [_, node] = item;
                 if (graph.getGID(node) >= NUM_CELLS)
                   return;
                 auto& node_data = graph.getData(node);
-                if (data_t sln_temp = solveQuadraticPush(node_data);
+                if (data_t sln_temp = quickUpdate(node_data);
                     sln_temp < galois::min(node_data.solution, sln_temp)) {
 #ifndef NDEBUG
                   if (node == 1104) {
@@ -487,6 +569,7 @@ void FastMarching(Graph& graph) {
 
 void SanityCheck(Graph& graph) {
   galois::DGReduceMax<double> max_error;
+  galois::DGReduceMax<double> max_val;
 
   const auto& masterNodes = graph.masterNodesRange();
   galois::do_all(
@@ -495,6 +578,9 @@ void SanityCheck(Graph& graph) {
         if (graph.getGID(node) >= NUM_CELLS)
           return;
         auto& my_data = graph.getData(node);
+        if (my_data.solution == 0.) { // TODO: identify sources?
+          return;
+        }
         if (my_data.solution == INF) {
           auto [ii, jj] = id2ij(graph.getGID(node));
           galois::gPrint("Untouched cell: ", node, " (g", graph.getGID(node),
@@ -502,9 +588,10 @@ void SanityCheck(Graph& graph) {
                          ii, " ", jj, ")\n");
           return;
         }
-
-        data_t new_val = solveQuadraticPush(my_data);
-        if (data_t old_val = my_data.solution; new_val != old_val) {
+        data_t old_val = my_data.solution;
+        max_val.update(old_val);
+        data_t new_val = quickUpdate(my_data);
+        if (new_val != old_val) {
           data_t error = std::abs(new_val - old_val) / std::abs(old_val);
           max_error.update(error);
           if (error > tolerance) {
@@ -517,8 +604,11 @@ void SanityCheck(Graph& graph) {
       },
       galois::no_stats(), galois::loopname("sanityCheck"));
 
+  auto mv = max_val.reduce();
+  DGPRINT("max arrival time: ", mv, "\n");
   auto me = max_error.reduce();
   DGPRINT("max err: ", me, "\n");
+  galois::runtime::reportStat_Single(std::string(REGION_NAME), "MaxError", me);
 }
 
 template <typename Graph, typename GNode = typename Graph::GraphNode>
@@ -541,11 +631,6 @@ int main(int argc, char** argv) noexcept {
 
   galois::gDebug(ALGO_NAMES[algo]);
 
-  SetKnobs(dims);
-
-  // if (galois::runtime::getSystemNetworkInterface().ID == 0) {
-  //   std::filesystem::exists(inputname);
-  // }
   galois::StatTimer Ttotal("TimerTotal");
   Ttotal.start();
 
@@ -558,13 +643,13 @@ int main(int argc, char** argv) noexcept {
   // _debug_print();
 
   // initialize all cells
-  SetupGrids(*graph);
+  setupGrids(*graph);
   initCells(*graph);
   galois::runtime::getHostBarrier().wait();
 
   // TODO better way for boundary settings?
   BL boundary;
-  AssignBoundary(*graph, boundary);
+  assignBoundary(*graph, boundary);
 
   bitset_upwind_solution.resize(graph->size());
   galois::runtime::getHostBarrier().wait();
@@ -574,24 +659,7 @@ int main(int argc, char** argv) noexcept {
     std::string tn = "Timer_" + std::to_string(run);
     galois::StatTimer Tmain(tn.c_str());
 
-    galois::DGAccumulator<uint32_t> busy;
-    busy.reset();
-    if (!boundary.empty()) {
-      busy += 1;
-#ifndef NDEBUG
-      // print boundary
-      for (GNode b : boundary) {
-        auto [ii, jj] = id2ij(graph->getGID(b));
-        DGDEBUG("boundary: ", b, "(g", graph->getGID(b),
-                (b < graph->numMasters() ? "M" : "m"), ") (", ii, " ", jj,
-                ") with ", graph->getData(b).solution);
-      }
-#endif
-      initBoundary(*graph, boundary);
-    } else {
-      DGDEBUG("No boundary element");
-    }
-    GALOIS_ASSERT(busy.reduce(), "Boundary not defined!");
+    initBoundary(*graph, boundary);
 
     Tmain.start();
 
@@ -605,7 +673,6 @@ int main(int argc, char** argv) noexcept {
     // SanityCheck2(graph);
 
     if ((run + 1) != numRuns) {
-      galois::runtime::getHostBarrier().wait();
       bitset_upwind_solution.reset();
 
       initBag.reset(new WL());
