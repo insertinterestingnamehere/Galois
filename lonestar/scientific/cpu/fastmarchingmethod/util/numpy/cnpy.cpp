@@ -118,9 +118,7 @@ void cnpy::parse_npy_header(unsigned char* buffer, size_t& word_size,
   // byte order code | stands for not applicable.
   // not sure when this applies except for byte array
   loc1 = header.find("descr") + 9;
-  bool littleEndian =
-      (header[loc1] == '<' || header[loc1] == '|' ? true : false);
-  assert(littleEndian);
+  assert(header[loc1] == '<' || header[loc1] == '|');
 
   // char type = header[loc1+1];
   // assert(type == map_type(T));
@@ -174,9 +172,7 @@ void cnpy::parse_npy_header(FILE* fp, size_t& word_size,
     throw std::runtime_error(
         "parse_npy_header: failed to find header keyword: 'descr'");
   loc1 += 9;
-  bool littleEndian =
-      (header[loc1] == '<' || header[loc1] == '|' ? true : false);
-  assert(littleEndian);
+  assert(header[loc1] == '<' || header[loc1] == '|');
 
   // char type = header[loc1+1];
   // assert(type == map_type(T));
