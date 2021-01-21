@@ -271,27 +271,6 @@ class Solver {
   ////////////////////////////////////////////////////////////////////////////////
   // Solver
 
-  template <typename It = typename Graph::edge_iterator>
-  bool checkDirection(data_t& up_sln, It dir) {
-    bool upwind = false;
-
-    auto FindUpwind = [&](It ei) {
-      GNode neighbor = graph.getEdgeDst(ei);
-      auto& n_data   = graph.getData(neighbor, no_lockable_flag);
-      if (data_t n_sln = n_data.solution.load(std::memory_order_relaxed);
-          n_sln < up_sln) {
-        up_sln = n_sln;
-        upwind = true;
-      }
-    };
-
-    // check one neighbor
-    FindUpwind(dir++);
-    // check the other neighbor
-    FindUpwind(dir);
-    return upwind;
-  }
-
   template <bool CONCURRENT, typename NodeData, typename It>
   data_t solveQuadratic(NodeData& my_data, It edge_begin, It) {
     const auto f = my_data.speed;
