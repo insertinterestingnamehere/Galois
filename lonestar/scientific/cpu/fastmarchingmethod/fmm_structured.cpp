@@ -30,6 +30,9 @@ static llvm::cl::opt<float> h_input{
     "h", llvm::cl::desc("Distance between discrete samples in the input grid."),
     llvm::cl::init(1.f)};
 
+#define CONSERVATIVE_WORK_ITEMS false
+#define STRICT_MONOTONICITY false
+
 namespace internal {
 template <typename T>
 struct StrConv;
@@ -172,8 +175,6 @@ int main(int argc, char** argv) {
     return {uN, uS, uE, uW};
   };
 
-  constexpr bool strict = false;
-
   float h                = h_input;
   auto difference_scheme = [&](double f, double h, double uH,
                                double uV) noexcept -> double {
@@ -184,7 +185,7 @@ int main(int argc, char** argv) {
       // nonincreasing property of the operator.
       double current  = .5 * (uH + uV + std::sqrt(2 * div * div - dif * dif));
       double previous = std::numeric_limits<double>::infinity();
-      if constexpr (strict) {
+      if constexpr (STRICT_MONOTONICITY) {
         // Use Newton's method to further mitigate violation of the
         // nonincreasing property caused by finite-precision arithmetic. This
         // loop is likely to only take one or two iterations.
@@ -206,20 +207,44 @@ int main(int argc, char** argv) {
       galois::iterate(initial),
       [&](work_t work_item, auto& context) noexcept {
         auto const [i, j] = unravel_index(work_item.id);
-        auto previous     = u(i, j).load(std::memory_order_relaxed);
-        if (previous < work_item.priority)
-          return;
-        auto const [uN, uS, uE, uW] = gather_neighbors(i, j);
-        auto const uH = std::min(uE, uW), uV = std::min(uN, uS);
-        double const new_u = difference_scheme(f(i, j), h, uH, uV);
-        if (std::isnan(new_u))
-          GALOIS_DIE("Differencing scheme returned NaN. This may result from "
-                     "insufficient precision or from bad input.");
-        do {
-          if (new_u >= previous)
+        double uN, uS, uE, uW, previous, new_u;
+        if constexpr (!CONSERVATIVE_WORK_ITEMS) {
+          previous = u(i, j).load(std::memory_order_relaxed);
+          if (previous < work_item.priority)
             return;
-        } while (!u(i, j).compare_exchange_weak(previous, new_u,
-                                                std::memory_order_relaxed));
+          auto const neighbor_vals = gather_neighbors(i, j);
+          uN                       = neighbor_vals[0];
+          uS                       = neighbor_vals[1];
+          uE                       = neighbor_vals[2];
+          uW                       = neighbor_vals[3];
+          auto const uH = std::min(uE, uW), uV = std::min(uN, uS);
+          new_u = difference_scheme(f(i, j), h, uH, uV);
+          if (std::isnan(new_u))
+            GALOIS_DIE("Differencing scheme returned NaN. This may result from "
+                       "insufficient precision or from bad input.");
+          do {
+            if (new_u >= previous)
+              return;
+          } while (!u(i, j).compare_exchange_weak(previous, new_u,
+                                                  std::memory_order_relaxed));
+        } else {
+          do {
+            previous        = u(i, j).load(std::memory_order_relaxed);
+            auto const vals = gather_neighbors(i, j);
+            uN              = vals[0];
+            uS              = vals[1];
+            uE              = vals[2];
+            uW              = vals[3];
+            double const uH = std::min(uE, uW);
+            double const uV = std::min(uN, uS);
+            new_u           = difference_scheme(f(i, j), h, uH, uV);
+            if (std::isnan(new_u))
+              GALOIS_DIE("Differencing scheme returned NaN.");
+            if (new_u == previous)
+              return;
+          } while (!u(i, j).compare_exchange_weak(previous, new_u,
+                                                  std::memory_order_relaxed));
+        }
         if (i && uS > new_u)
           context.push(work_t({new_u, ravel_index(i - 1, j)}));
         if (i < ny - 1 && uN > new_u)
@@ -233,7 +258,8 @@ int main(int argc, char** argv) {
       galois::wl<OBIM>(indexer));
 
   // Tolerance for non-strict differencing operator.
-  double constexpr tolerance = 1E-14;
+  double constexpr tolerance = CONSERVATIVE_WORK_ITEMS ? 0. : 1E-14;
+  // double constexpr tolerance = 0.;
 
   galois::do_all(
       galois::iterate(std::size_t(0u), nx * ny),
@@ -246,7 +272,7 @@ int main(int argc, char** argv) {
         double const new_u = difference_scheme(f(i, j), h, uH, uV);
         double const old_u = u(i, j).load(std::memory_order_relaxed);
         if (new_u != old_u) {
-          if (strict ||
+          if (STRICT_MONOTONICITY ||
               (std::abs(new_u - old_u) > tolerance * std::max(new_u, old_u))) {
             std::cout << new_u << " " << old_u << " " << new_u - old_u
                       << std::endl;
