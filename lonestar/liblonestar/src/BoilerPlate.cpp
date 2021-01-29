@@ -56,6 +56,10 @@ void LonestarStart(int argc, char** argv) {
 void LonestarStart(int argc, char** argv, const char* app, const char* desc,
                    const char* url, llvm::cl::opt<std::string>* input) {
   llvm::cl::SetVersionPrinter(LonestarPrintVersion);
+  { // LLVM-defined '-color' is only used for llvm::WithColor; mute it to avoid
+    // ambiguity
+    llvm::cl::getRegisteredOptions()["color"]->setHiddenFlag(llvm::cl::Hidden);
+  }
   llvm::cl::ParseCommandLineOptions(argc, argv);
   numThreads = galois::setActiveThreads(numThreads);
 

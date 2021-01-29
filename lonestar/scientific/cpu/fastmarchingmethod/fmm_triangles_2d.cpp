@@ -55,8 +55,7 @@ static char const* desc =
     "(https://en.wikipedia.org/wiki/Fast_marching_method)";
 static char const* url = "";
 
-using data_t         = double;
-constexpr data_t INF = std::numeric_limits<data_t>::max();
+using data_t = double;
 
 static llvm::cl::opt<std::string> filename(llvm::cl::Positional,
                                            llvm::cl::desc("<input file>"),

@@ -1,7 +1,4 @@
 # if(("${CMAKE_VERSION}" VERSION_GREATER 3.8.0) OR ("${CMAKE_VERSION}" VERSION_EQUAL 3.8.0))
-  app(grids_gen grids_gen.cpp)
-  set_property(TARGET grids_gen PROPERTY CXX_STANDARD 17)
-
   add_subdirectory(util)
 
   app(fmm fmm.cpp speed_function.cpp boundary.cpp)

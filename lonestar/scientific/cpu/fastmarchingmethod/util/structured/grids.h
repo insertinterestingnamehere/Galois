@@ -53,9 +53,9 @@ static auto WriteCsrGrids(galois::graphs::FileGraphWriter& temp_graph,
   // This condition isn't true in irregular meshes,
   // but that'd be a separate mesh generation routine.
   temp_graph.phase1();
-  for (std::size_t i = 0; i < nx; i++) {
-    for (std::size_t j = 0; j < ny; j++) {
-      std::size_t id = i * ny + j;
+  for (std::size_t i = 0; i < ny; i++) {
+    for (std::size_t j = 0; j < nx; j++) {
+      std::size_t id = i * nx + j;
       for (std::size_t l = 0; l < 4; l++) {
         temp_graph.incrementDegree(id);
       }
@@ -80,28 +80,17 @@ static auto WriteCsrGrids(galois::graphs::FileGraphWriter& temp_graph,
       y_high_face_start(0);
   if constexpr (PADDING) {
     x_low_face_start  = num_cells;
-    x_high_face_start = x_low_face_start + nx;
-    y_low_face_start  = x_high_face_start + nx;
-    y_high_face_start = y_low_face_start + ny;
+    x_high_face_start = x_low_face_start + ny;
+    y_low_face_start  = x_high_face_start + ny;
+    y_high_face_start = y_low_face_start + nx;
     assert(("Error in logic for dividing up node ids for exterior faces." &&
-            num_nodes == y_high_face_start + ny));
+            num_nodes == y_high_face_start + nx));
   }
-  for (std::size_t i = 0; i < nx; i++) {
-    for (std::size_t j = 0; j < ny; j++) {
-      std::size_t id = i * ny + j;
-      if (i > 0) {
-        temp_graph.addNeighbor(id, id - ny);
-      } else {
-        if constexpr (PADDING) {
-          std::size_t ghost_id = y_low_face_start + j;
-          temp_graph.addNeighbor(ghost_id, id);
-          temp_graph.addNeighbor(id, ghost_id);
-        } else {
-          temp_graph.addNeighbor(id, id); // dummy edge
-        }
-      }
-      if (i < nx - 1) {
-        temp_graph.addNeighbor(id, id + ny);
+  for (std::size_t i = 0; i < ny; i++) {
+    for (std::size_t j = 0; j < nx; j++) {
+      std::size_t id = i * nx + j;
+      if (i < ny - 1) {
+        temp_graph.addNeighbor(id, id + nx); // North
       } else {
         if constexpr (PADDING) {
           std::size_t ghost_id = y_high_face_start + j;
@@ -111,22 +100,33 @@ static auto WriteCsrGrids(galois::graphs::FileGraphWriter& temp_graph,
           temp_graph.addNeighbor(id, id); // dummy edge
         }
       }
-      if (j > 0) {
-        temp_graph.addNeighbor(id, id - 1);
+      if (i > 0) {
+        temp_graph.addNeighbor(id, id - nx); // South
       } else {
         if constexpr (PADDING) {
-          std::size_t ghost_id = x_low_face_start + i;
+          std::size_t ghost_id = y_low_face_start + j;
           temp_graph.addNeighbor(ghost_id, id);
           temp_graph.addNeighbor(id, ghost_id);
         } else {
           temp_graph.addNeighbor(id, id); // dummy edge
         }
       }
-      if (j < ny - 1) {
-        temp_graph.addNeighbor(id, id + 1);
+      if (j < nx - 1) {
+        temp_graph.addNeighbor(id, id + 1); // East
       } else {
         if constexpr (PADDING) {
           std::size_t ghost_id = x_high_face_start + i;
+          temp_graph.addNeighbor(ghost_id, id);
+          temp_graph.addNeighbor(id, ghost_id);
+        } else {
+          temp_graph.addNeighbor(id, id); // dummy edge
+        }
+      }
+      if (j > 0) {
+        temp_graph.addNeighbor(id, id - 1); // West
+      } else {
+        if constexpr (PADDING) {
+          std::size_t ghost_id = x_low_face_start + i;
           temp_graph.addNeighbor(ghost_id, id);
           temp_graph.addNeighbor(id, ghost_id);
         } else {
@@ -266,16 +266,18 @@ auto ConstructCsrGrids(Graph& built_graph,
   static_assert(D == 2 || D == 3, "Only support 2-D or 3-D for now.");
   galois::graphs::FileGraphWriter temp_graph;
   auto params = WriteCsrGrids<typename Graph::edge_data_type>(temp_graph, dims);
+  // temp_graph.toFile("/net/ohm/export/iss/inputs/synth_grids/"
+  //                   "p_wave_velocity_x4.gr");
   galois::graphs::readGraph(built_graph, temp_graph);
   return params;
 }
 
 // Generate and save to file.
-template <typename edge_data_type>
-void ConstructCsrGrids(std::string filename, std::size_t nx, std::size_t ny,
-                       std::size_t nz) noexcept {
+template <std::size_t D, typename edge_data_type>
+void ConstructCsrGrids(std::string filename,
+                       std::array<std::size_t, D> dims) noexcept {
+  static_assert(D == 2 || D == 3, "Only support 2-D or 3-D for now.");
   galois::graphs::FileGraphWriter temp_graph;
-  WriteCsrGrids<edge_data_type>(temp_graph,
-                                std::array<std::size_t, 3>{nx, ny, nz});
+  WriteCsrGrids<edge_data_type>(temp_graph, dims);
   temp_graph.toFile(filename);
 }

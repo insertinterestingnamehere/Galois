@@ -16,12 +16,15 @@
  * including but not limited to those resulting from defects in Software and/or
  * Documentation, or loss or inaccuracy of data of any kind.
  */
+using data_t = double;
+#include <limits>
+constexpr data_t INF = std::numeric_limits<data_t>::infinity();
 
 #include <array>
-using double2d_t = std::array<double, 2>;
-using double3d_t = std::array<double, 3>;
-using size2d_t   = std::array<std::size_t, 2>;
-using size3d_t   = std::array<std::size_t, 3>;
+using data2d_t = std::array<data_t, 2>;
+using data3d_t = std::array<data_t, 3>;
+using size2d_t = std::array<std::size_t, 2>;
+using size3d_t = std::array<std::size_t, 3>;
 
 // Idk why this hasn't been standardized in C++ yet, but here it is.
 static constexpr double PI =
@@ -36,6 +39,9 @@ double BoundaryCondition(Tuple&& coords = {});
 template <typename Tuple>
 bool NonNegativeRegion(Tuple&& coords = {});
 
+/**
+ * Wrap heap with push(...) and pop() interfaces.
+ */
 template <typename HeapTy>
 struct FMMHeapWrapper {
   typedef typename HeapTy::key_type key_type;
@@ -46,21 +52,13 @@ struct FMMHeapWrapper {
   inline auto end() { return wl.end(); }
 
   inline bool empty() { return wl.empty(); }
+  inline void clear() { wl.clear(); }
 
   void push(const value_type& p, const key_type& old_sln = 0) {
     auto [sln_temp, dst] = p;
     auto iter            = wl.lower_bound(old_sln);
     for (; iter != wl.end(); std::advance(iter, 1)) {
-      // if (dst == 274) {
-      //   galois::gDebug("274: ", old_sln, " iter: ", iter->first, " ",
-      //   iter->second);
-      // }
       if (iter->second == dst) {
-        // if (dst == 274) {
-        //   galois::gDebug("274 catch: ", old_sln, " iter: ", iter->first, " ",
-        //   iter->second);
-        // }
-
         break;
       }
       if (iter->first != old_sln) {
@@ -68,23 +66,9 @@ struct FMMHeapWrapper {
         break;
       }
     }
-    //  if (dst == 274) {
-    //    galois::gDebug("274 finished: ", old_sln, " iter: ", iter->first, " ",
-    //    iter->second);
-    //  }
     if (iter == wl.end()) {
-      // if (dst == 274) {
-      //   galois::gDebug("dumping heap ...");
-      //   for (auto i : wl) {
-      //     galois::gDebug(i.first, " ", i.second);
-      //     assert(i.second != 274);
-      //   }
-      //   galois::gDebug(dstData.tag);
-      //   assert(dstData.tag == BAND);
-      // }
       wl.insert({sln_temp, dst});
     } else {
-      // if (dst == 274) assert(dstData.tag == BAND);
       auto nh  = wl.extract(iter); // node handle
       nh.key() = sln_temp;
       wl.insert(std::move(nh));
@@ -95,5 +79,24 @@ struct FMMHeapWrapper {
     auto pair = *(wl.begin());
     wl.erase(wl.begin()); // TODO serial only
     return pair;
+  }
+};
+
+/**
+ * Unify push w/ or w/o hints.
+ */
+struct PushWrap {
+  // Generic template: ignore redundant arguments
+  template <typename C, typename T = typename C::value_type, typename... Args>
+  void operator()(C& cont, T&& item, Args&&...) {
+    cont.push(std::forward<T>(item));
+  }
+
+  // Template for heaps: hint provided for faster insertion
+  template <typename H, typename W = FMMHeapWrapper<H>,
+            typename T = typename W::value_type,
+            typename K = typename W::key_type>
+  void operator()(W& cont, T&& item, K&& hint) {
+    cont.push(std::forward<T>(item), std::forward<K>(hint));
   }
 };

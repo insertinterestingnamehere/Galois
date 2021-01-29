@@ -89,55 +89,42 @@ static llvm::cl::opt<float> rounding_scale{
     "rounding_scale", llvm::cl::desc("Scale to use for roundoff."),
     llvm::cl::init(1.f)};
 
+static std::size_t ny, nx;
+
+auto ravel_index = [](std::size_t i, std::size_t j) noexcept -> std::size_t {
+  return i * nx + j;
+};
+
+// TODO: use fastmod for this since it's a repeated operation.
+auto unravel_index = [](std::size_t id) noexcept -> std::array<std::size_t, 2> {
+  return {id / nx, id % nx};
+};
+
 struct work_t {
   double priority;
   std::size_t id;
 };
 
-int main(int argc, char** argv) {
-
+int main(int argc, char** argv) noexcept {
   galois::SharedMemSys galois_system;
   LonestarStart(argc, argv, name, desc, url, nullptr);
 
-  std::size_t source_i, source_j;
-  if (source_coordinates.empty()) {
-    source_i = source_j = 0u;
-  } else {
-    source_i = source_coordinates[0];
-    source_j = source_coordinates[1];
-  }
-
+  /*
+   * setupGrids
+   */
   cnpy::NpyArray npy = cnpy::npy_load(input_npy);
   if (npy.word_size != sizeof(float))
     GALOIS_DIE("Wrong data type.");
   if (npy.shape.size() != 2)
     GALOIS_DIE("Data should be 2-D.");
-  std::size_t ny = npy.shape[0], nx = npy.shape[1];
-
-  auto ravel_index = [=](std::size_t i, std::size_t j) noexcept -> std::size_t {
-    return i * nx + j;
-  };
-
-  // TODO: use fastmod for this since it's a repeated operation.
-  auto unravel_index =
-      [=](std::size_t id) noexcept -> std::array<std::size_t, 2> {
-    return {id / nx, id % nx};
-  };
-
-  galois::InsertBag<work_t> initial;
-  if (source_i)
-    initial.push(work_t({0.f, ravel_index(source_i - 1, source_j)}));
-  if (source_i < ny - 1)
-    initial.push(work_t({0.f, ravel_index(source_i + 1, source_j)}));
-  if (source_j)
-    initial.push(work_t({0.f, ravel_index(source_i, source_j - 1)}));
-  if (source_j < nx - 1)
-    initial.push(work_t({0.f, ravel_index(source_i, source_j + 1)}));
-
+  std::shared_ptr<float[]> speed =
+      std::reinterpret_pointer_cast<float[]>(npy.data_holder);
+  GALOIS_ASSERT(speed, "Failed to load speed data.");
+  ny = npy.shape[0], nx = npy.shape[1];
   // Use a lambda for indexing into the speed function.
   auto f = [&](size_t i, size_t j) noexcept -> float {
     assert(i < ny && j < nx && "Out of bounds access.");
-    return std::cref(npy.data<float>()[i * nx + j]);
+    return std::cref(speed[i * nx + j]);
   };
 
   galois::LargeArray<std::atomic<double>> u_buffer;
@@ -150,8 +137,36 @@ int main(int argc, char** argv) {
     std::atomic<double>& ret = u_buffer[i * nx + j];
     return ret;
   };
+
+  /*
+   * assignBoundary
+   */
+  std::size_t source_i, source_j;
+  if (source_coordinates.empty()) {
+    source_i = source_j = 0u;
+  } else {
+    source_i = source_coordinates[0];
+    source_j = source_coordinates[1];
+  }
+
+  galois::InsertBag<work_t> initial;
+  if (source_i)
+    initial.push(work_t({0.f, ravel_index(source_i - 1, source_j)}));
+  if (source_i < ny - 1)
+    initial.push(work_t({0.f, ravel_index(source_i + 1, source_j)}));
+  if (source_j)
+    initial.push(work_t({0.f, ravel_index(source_i, source_j - 1)}));
+  if (source_j < nx - 1)
+    initial.push(work_t({0.f, ravel_index(source_i, source_j + 1)}));
+
+  /*
+   * initBoundary
+   */
   u(source_i, source_j).store(0.f, std::memory_order_relaxed);
 
+  /*
+   * runAlgo
+   */
   float scale  = rounding_scale;
   auto indexer = [&](work_t item) noexcept -> std::size_t {
     return std::round(scale * item.priority);
@@ -257,6 +272,9 @@ int main(int argc, char** argv) {
       galois::loopname("fmm"), galois::disable_conflict_detection(),
       galois::wl<OBIM>(indexer));
 
+  /*
+   * sanityCheck
+   */
   // Tolerance for non-strict differencing operator.
   double constexpr tolerance = CONSERVATIVE_WORK_ITEMS ? 0. : 1E-14;
   // double constexpr tolerance = 0.;

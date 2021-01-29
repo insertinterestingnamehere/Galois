@@ -19,14 +19,14 @@
 #include "fastmarchingmethod.h"
 
 template <>
-double BoundaryCondition(double2d_t&& coords) {
+double BoundaryCondition(data2d_t&& coords) {
   [[maybe_unused]] const auto& [x, y] = coords;
 
   return 0.;
 }
 
 template <>
-bool NonNegativeRegion(double2d_t&& coords) {
+bool NonNegativeRegion(data2d_t&& coords) {
   [[maybe_unused]] const auto& [x, y] = coords;
 
   // Example 1: a spherical interface of radius 0.25 centered at the origin
@@ -39,14 +39,14 @@ bool NonNegativeRegion(double2d_t&& coords) {
 // 3D
 
 template <>
-double BoundaryCondition(double3d_t&& coords) {
+double BoundaryCondition(data3d_t&& coords) {
   [[maybe_unused]] const auto& [x, y, z] = coords;
 
   return 0.;
 }
 
 template <>
-bool NonNegativeRegion(double3d_t&& coords) {
+bool NonNegativeRegion(data3d_t&& coords) {
   [[maybe_unused]] const auto& [x, y, z] = coords;
 
   // Example 1: a spherical interface of radius 0.25 centered at the origin

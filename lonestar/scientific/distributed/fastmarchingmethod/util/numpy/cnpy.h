@@ -24,20 +24,20 @@ struct NpyArray {
     num_vals = 1;
     for (size_t i = 0; i < shape.size(); i++)
       num_vals *= shape[i];
-    data_holder = std::shared_ptr<std::vector<char>>(
-        new std::vector<char>(num_vals * word_size));
+    data_holder = std::shared_ptr<char[]>(new char[num_vals * word_size]);
+    nbytes      = num_vals * word_size;
   }
 
   NpyArray() : shape(0), word_size(0), fortran_order(0), num_vals(0) {}
 
   template <typename T>
   T* data() {
-    return reinterpret_cast<T*>(&(*data_holder)[0]);
+    return reinterpret_cast<T*>(&data_holder[0]);
   }
 
   template <typename T>
   const T* data() const {
-    return reinterpret_cast<T*>(&(*data_holder)[0]);
+    return reinterpret_cast<T*>(&data_holder[0]);
   }
 
   template <typename T>
@@ -46,9 +46,10 @@ struct NpyArray {
     return std::vector<T>(p, p + num_vals);
   }
 
-  size_t num_bytes() const { return data_holder->size(); }
+  size_t num_bytes() const { return nbytes; }
 
-  std::shared_ptr<std::vector<char>> data_holder;
+  size_t nbytes;
+  std::shared_ptr<char[]> data_holder;
   std::vector<size_t> shape;
   size_t word_size;
   bool fortran_order;

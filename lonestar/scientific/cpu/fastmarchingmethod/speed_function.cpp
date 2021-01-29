@@ -19,7 +19,7 @@
 #include "fastmarchingmethod.h"
 
 template <>
-double SpeedFunction(double2d_t&& coords) {
+data_t SpeedFunction(data2d_t&& coords) {
   [[maybe_unused]] const auto& [x, y] = coords;
 
   return 1.;
@@ -28,7 +28,7 @@ double SpeedFunction(double2d_t&& coords) {
 }
 
 template <>
-double SpeedFunction(double3d_t&& coords) {
+data_t SpeedFunction(data3d_t&& coords) {
   [[maybe_unused]] const auto& [x, y, z] = coords;
 
   return 1.;
