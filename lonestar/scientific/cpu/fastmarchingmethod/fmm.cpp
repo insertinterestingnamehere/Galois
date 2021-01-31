@@ -38,7 +38,7 @@
 
 #include "Lonestar/BoilerPlate.h"
 
-static char const* name = "Fast Marching Method";
+static char const* name = "Eikonal Solvers";
 static char const* desc =
     "Eikonal equation solver "
     "(https://en.wikipedia.org/wiki/Fast_marching_method)";
@@ -80,6 +80,11 @@ static llvm::cl::opt<bool> strict{
     "strict",
     llvm::cl::desc(
         "Force non-increasing update to mitigate catastrophic cancellation"),
+    llvm::cl::cat(catAlgo)};
+static llvm::cl::opt<bool> conservative{
+    "conservative",
+    llvm::cl::desc("Alternative method to get determinism: conservative "
+                   "approach to pushing redundant work items"),
     llvm::cl::cat(catAlgo)};
 
 static llvm::cl::OptionCategory catInput{"2. Input Options"};
@@ -209,11 +214,11 @@ struct NodeData {
 using Graph =
     galois::graphs::LC_CSR_Graph<NodeData, void>::with_no_lockable<true>::type;
 using GNode         = Graph::GraphNode;
-using BL            = galois::InsertBag<GNode>;
+using NodeListTy    = galois::InsertBag<GNode>;
 using UpdateRequest = std::pair<data_t, GNode>;
 using HeapTy        = FMMHeapWrapper<
     std::multimap<UpdateRequest::first_type, UpdateRequest::second_type>>;
-using WL = galois::InsertBag<UpdateRequest>;
+using ReqListTy = galois::InsertBag<UpdateRequest>;
 #define CHUNK_SIZE 128
 
 // These reference the input parameters as global data so they have to be
@@ -221,7 +226,11 @@ using WL = galois::InsertBag<UpdateRequest>;
 #include "util/input.hh"
 #include "util/output.hh"
 
-// Prototype
+/**
+ * Generic Eikonal solver type.
+ *
+ * The public interfaces show the work flow of an Eikonal solver.
+ */
 class EikonalSolver {
 protected:
   struct Verifier {
@@ -231,27 +240,22 @@ protected:
   };
 
 public:
-  virtual void sanityCheck() = 0;
+  virtual void determineBoundary() = 0;
+  virtual void initBoundary()      = 0;
+  virtual void runAlgo()           = 0;
+  virtual void sanityCheck()       = 0;
   virtual void exportResults() {
     if (!output_npy.empty() || !output_csv.empty())
       galois::gWarn("exportResults: not implemented.");
   }
 };
 
-// TODO: replace with ij2id
-std::size_t ravel_index(std::size_t i, std::size_t j) noexcept {
-  return i * nx + j;
-};
-
-// TODO: replace with id2ij
-// TODO: use fastmod for this since it's a repeated operation.
-std::array<std::size_t, 2> unravel_index(std::size_t id) noexcept {
-  return {id / nx, id % nx};
-};
-
+/**
+ * Solver implementation w/ dense layout (SoA).
+ */
 class DenseSolver : public EikonalSolver {
 protected:
-  galois::LargeArray<std::atomic<double>> u_buffer;
+  galois::LargeArray<std::atomic<data_t>> u_buffer;
   std::shared_ptr<float[]> speed;
   std::size_t source_i, source_j; // single source TODO: source bag
 
@@ -262,15 +266,15 @@ protected:
   };
 
   // Also use a lambda for indexing into the solution.
-  std::atomic<double>& u(size_t i, size_t j) noexcept {
+  std::atomic<data_t>& u(size_t i, size_t j) noexcept {
     assert(i < ny && j < nx && "Out of bounds access.");
-    std::atomic<double>& ret = u_buffer[i * nx + j];
+    std::atomic<data_t>& ret = u_buffer[i * nx + j];
     return ret;
   };
 
-  std::array<double, 4> gather_neighbors(std::size_t i,
+  std::array<data_t, 4> gather_neighbors(std::size_t i,
                                          std::size_t j) noexcept {
-    double uN = std::numeric_limits<double>::infinity(), uS = uN, uE = uS,
+    data_t uN = std::numeric_limits<data_t>::infinity(), uS = uN, uE = uS,
            uW = uE;
     if (i)
       uS = u(i - 1, j).load(std::memory_order_relaxed);
@@ -283,14 +287,14 @@ protected:
     return {uN, uS, uE, uW};
   };
 
-  double difference_scheme(double f, double h, double uH, double uV) noexcept {
-    double div = h / f, dif = uH - uV;
+  data_t difference_scheme(data_t f, data_t h, data_t uH, data_t uV) noexcept {
+    data_t div = h / f, dif = uH - uV;
     if (!std::isinf(uH) && !std::isinf(uV) && std::abs(dif) < div) {
       // This variant of the differencing scheme is set up to avoid catastrophic
       // cancellation. The resulting precision loss can cause violations of the
       // nonincreasing property of the operator.
-      double current  = .5 * (uH + uV + std::sqrt(2 * div * div - dif * dif));
-      double previous = std::numeric_limits<double>::infinity();
+      data_t current  = .5 * (uH + uV + std::sqrt(2 * div * div - dif * dif));
+      data_t previous = std::numeric_limits<data_t>::infinity();
       if (strict) {
         // Use Newton's method to further mitigate violation of the
         // nonincreasing property caused by finite-precision arithmetic. This
@@ -307,6 +311,19 @@ protected:
       }
     }
     return std::min(uH, uV) + div;
+  };
+
+  data_t solve(std::size_t i, std::size_t j) {
+    auto const [uN, uS, uE, uW] = gather_neighbors(i, j);
+    auto const uH = std::min(uE, uW), uV = std::min(uN, uS);
+    return difference_scheme(f(i, j), dx, uH, uV);
+  }
+
+  std::array<std::tuple<bool, std::size_t, std::size_t>, 4>
+  neighbors(std::size_t i, std::size_t j) {
+    return {std::make_tuple(i, i - 1, j), std::make_tuple(i < ny - 1, i + 1, j),
+            std::make_tuple(j, i, j - 1),
+            std::make_tuple(j < nx - 1, i, j + 1)};
   };
 
   friend struct SelfVerifier;
@@ -395,7 +412,7 @@ public:
   // Old input:
   // source_coordinates("d", llvm::cl::value_desc("i,j"),
   // llvm::cl::desc("Indices of the source point."));
-  void assignBoundary() {
+  void determineBoundary() {
     switch (source_type) {
     case scatter: {
       // if (source_coordinates.empty()) {
@@ -418,6 +435,8 @@ public:
   void initBoundary() {
     u(source_i, source_j).store(0., std::memory_order_relaxed);
   }
+
+  virtual void runAlgo() = 0;
 
   void sanityCheck() {
     if (skipVerify) {
@@ -464,10 +483,13 @@ public:
   }
 };
 
+/**
+ * Solver implementation w/ CSR layout (AoS)
+ */
 class CSRSolver : public EikonalSolver {
 protected:
   Graph graph;
-  BL boundary;
+  NodeListTy boundary;
   PushWrap pushWrap;
   galois::substrate::PerThreadStorage<
       std::array<std::pair<data_t, data_t>, DIM_LIMIT>>
@@ -709,7 +731,7 @@ public:
   /**
    * Pick boundary nodes and assign them to the boundary list.
    */
-  void assignBoundary() {
+  void determineBoundary() {
     switch (source_type) {
     case scatter: {
       std::size_t n = xy2id({0., 0.});
@@ -732,7 +754,7 @@ public:
               }
             }
           },
-          galois::loopname("assignBoundary"));
+          galois::loopname("determineBoundary"));
     } break;
     default:
       GALOIS_DIE("Unknown boundary type.");
@@ -756,7 +778,7 @@ public:
   void initBoundary() {
     galois::do_all(
         galois::iterate(boundary.begin(), boundary.end()),
-        [&](const BL::value_type& node) noexcept {
+        [&](const NodeListTy::value_type& node) noexcept {
           auto& curData = graph.getData(node, UNPROTECTED);
           curData.solution.store(BoundaryCondition(id2xy(node)),
                                  std::memory_order_relaxed);
@@ -767,8 +789,7 @@ public:
   /**
    * Start interface.
    */
-  template <bool CONCURRENT, typename WL>
-  void runAlgo();
+  virtual void runAlgo() = 0;
 
   /**
    * Verify results.
@@ -833,6 +854,9 @@ public:
 template <typename LayoutTy, bool CONCURRENT, typename WorkListTy>
 class FastMarchingMethod : public LayoutTy {};
 
+/**
+ * Dense impl. of FMM
+ */
 template <bool CONCURRENT, typename WorkListTy>
 class FastMarchingMethod<DenseSolver, CONCURRENT, WorkListTy>
     : public DenseSolver {
@@ -861,9 +885,12 @@ public:
   }
 };
 
-// Dense, parallel
+/**
+ * Dense parallel execution of FMM
+ */
 template <>
-void FastMarchingMethod<DenseSolver, true, WL>::exec(WL& initial) {
+void FastMarchingMethod<DenseSolver, true, ReqListTy>::exec(
+    ReqListTy& initial) {
   galois::GAccumulator<std::size_t> emptyWork;
   galois::GAccumulator<std::size_t> badWork;
   emptyWork.reset();
@@ -885,19 +912,44 @@ void FastMarchingMethod<DenseSolver, true, WL>::exec(WL& initial) {
           emptyWork += 1;
           return;
         }
-        auto const [uN, uS, uE, uW] = gather_neighbors(i, j);
-        auto const uH = std::min(uE, uW), uV = std::min(uN, uS);
-        double const new_u = difference_scheme(f(i, j), dx, uH, uV);
-        if (std::isnan(new_u))
-          GALOIS_DIE("Differencing scheme returned NaN. This may result from "
-                     "insufficient precision or from bad input.");
-        do {
-          if (new_u >= cur_u)
-            return;
-        } while (!u(i, j).compare_exchange_weak(cur_u, new_u,
-                                                std::memory_order_relaxed));
         if (cur_u != INF)
           badWork += 1;
+        data_t uN, uS, uE, uW, new_u;
+        if (conservative) {
+          do {
+            auto u_neib   = gather_neighbors(i, j);
+            uN            = u_neib[0];
+            uS            = u_neib[1];
+            uE            = u_neib[2];
+            uW            = u_neib[3];
+            auto const uH = std::min(uE, uW), uV = std::min(uN, uS);
+            new_u = difference_scheme(f(i, j), dx, uH, uV);
+            if (std::isnan(new_u))
+              GALOIS_DIE(
+                  "Differencing scheme returned NaN. This may result from "
+                  "insufficient precision or from bad input.");
+            if (new_u == cur_u)
+              return;
+          } while (!u(i, j).compare_exchange_weak(cur_u, new_u,
+                                                  std::memory_order_relaxed));
+        } else {
+          // FIXME: ugly and repetitive code
+          auto u_neib   = gather_neighbors(i, j);
+          uN            = u_neib[0];
+          uS            = u_neib[1];
+          uE            = u_neib[2];
+          uW            = u_neib[3];
+          auto const uH = std::min(uE, uW), uV = std::min(uN, uS);
+          new_u = difference_scheme(f(i, j), dx, uH, uV);
+          if (std::isnan(new_u))
+            GALOIS_DIE("Differencing scheme returned NaN. This may result from "
+                       "insufficient precision or from bad input.");
+          do {
+            if (new_u >= cur_u)
+              return;
+          } while (!u(i, j).compare_exchange_weak(cur_u, new_u,
+                                                  std::memory_order_relaxed));
+        }
 
         if (i && uS > new_u)
           context.push(UpdateRequest{new_u, ravel_index(i - 1, j)});
@@ -969,7 +1021,7 @@ public:
 };
 
 template <>
-void FastMarchingMethod<CSRSolver, true, WL>::exec(WL& wl) {
+void FastMarchingMethod<CSRSolver, true, ReqListTy>::exec(ReqListTy& wl) {
   galois::GAccumulator<std::size_t> emptyWork;
   galois::GAccumulator<std::size_t> nonEmptyWork;
   emptyWork.reset();
@@ -1161,13 +1213,17 @@ public:
   }
 };
 
+/**
+ * Dense parallel execution of FIM
+ */
 template <>
-void FastIterativeMethod<DenseSolver, true, WL>::exec(std::unique_ptr<WL>& wl) {
+void FastIterativeMethod<DenseSolver, true, ReqListTy>::exec(
+    std::unique_ptr<ReqListTy>& wl) {
   galois::GAccumulator<std::size_t> badWork;
   badWork.reset();
 
   // Jacobi iteration
-  std::unique_ptr<WL> next(new WL());
+  std::unique_ptr<ReqListTy> next(new ReqListTy());
 
   //! Run algo
   std::size_t round = 0;
@@ -1181,51 +1237,61 @@ void FastIterativeMethod<DenseSolver, true, WL>::exec(std::unique_ptr<WL>& wl) {
               galois::iterate(wl->begin(), wl->end()),
               [&](const auto& work_item) {
                 auto [old_u, id] = work_item;
-                galois::gDebug(old_u, " ", id);
                 assert(id < NUM_CELLS && "Ghost Point!");
                 auto const [i, j] = unravel_index(id);
-                auto cur_u        = u(i, j).load(std::memory_order_relaxed);
 
-                // Ignore stale repetitive work items
-                if (cur_u < old_u) {
+                auto cur_u = u(i, j).load(std::memory_order_relaxed);
+                if (cur_u < old_u) { // empty
                   return;
                 }
-
-                auto const [uN, uS, uE, uW] = gather_neighbors(i, j);
-                auto const uH = std::min(uE, uW), uV = std::min(uN, uS);
-                double const new_u = difference_scheme(f(i, j), dx, uH, uV);
-
+                data_t const new_u = solve(i, j);
                 if (std::isnan(new_u))
                   GALOIS_DIE(
                       "Differencing scheme returned NaN. This may result from "
                       "insufficient precision or from bad input.");
-
                 do {
-                  if (new_u >= cur_u)
+                  if (new_u > cur_u)
                     return;
                 } while (!u(i, j).compare_exchange_weak(
                     cur_u, new_u, std::memory_order_relaxed));
-
-                if (cur_u != INF)
+                if (cur_u != INF) {
                   badWork += 1;
+                }
 
-                /*
-                if (new_u != INF &&
-                    std::abs(new_u - cur_u) >= tolerance) { // not converged
-                  galois::gDebug("not converged:", new_u, " ", id);
+                // "decreased" semantics implemented as "changed" due to
+                // finite precision
+                if (std::abs(cur_u - new_u) >= tolerance) { // not converged
                   next->push(UpdateRequest{new_u, id});
                   return;
                 }
-                */
 
-                if (i && uS > new_u)
-                  next->push(UpdateRequest{new_u, ravel_index(i - 1, j)});
-                if (i < ny - 1 && uN > new_u)
-                  next->push(UpdateRequest{new_u, ravel_index(i + 1, j)});
-                if (j && uW > new_u)
-                  next->push(UpdateRequest{new_u, ravel_index(i, j - 1)});
-                if (j < nx - 1 && uE > new_u)
-                  next->push(UpdateRequest{new_u, ravel_index(i, j + 1)});
+                for (auto [valid, ii, jj] : neighbors(i, j)) {
+                  if (!valid) // TODO: or in the work list
+                    continue;
+                  // TODO: similar code repeated
+                  auto cur_u = u(ii, jj).load(std::memory_order_relaxed);
+                  data_t const new_u = solve(ii, jj);
+                  if (std::isnan(new_u))
+                    GALOIS_DIE("Differencing scheme returned NaN. This may "
+                               "result from "
+                               "insufficient precision or from bad input.");
+                  do {
+                    if (new_u > cur_u)
+                      goto fim_next_neighbor;
+                  } while (!u(ii, jj).compare_exchange_weak(
+                      cur_u, new_u, std::memory_order_relaxed));
+                  if (cur_u != INF) {
+                    badWork += 1;
+                  }
+
+                  // "decreased" semantics implemented as "changed" due to
+                  // finite precision
+                  if (std::abs(cur_u - new_u)) {
+                    next->push(UpdateRequest{new_u, ravel_index(ii, jj)});
+                  }
+                fim_next_neighbor:
+                  continue;
+                }
               },
               galois::steal(),
               // galois::no_stats(),
@@ -1298,14 +1364,14 @@ public:
 };
 
 template <>
-void FastIterativeMethod<CSRSolver, true, WL>::exec(WL* wl) {
+void FastIterativeMethod<CSRSolver, true, ReqListTy>::exec(ReqListTy* wl) {
   galois::GAccumulator<std::size_t> emptyWork;
   galois::GAccumulator<std::size_t> nonEmptyWork;
   emptyWork.reset();
   nonEmptyWork.reset();
 
   // Jacobi iteration
-  WL* next = new WL();
+  ReqListTy* next = new ReqListTy();
 
   auto PushOp = [&](const auto& item) {
     // using ItemTy = std::remove_cv_t<std::remove_reference_t<decltype(item)>>;
@@ -1364,7 +1430,7 @@ void FastIterativeMethod<CSRSolver, true, WL>::exec(WL* wl) {
   };
 
   //! Run algo
-  using T      = typename WL::value_type;
+  using T      = typename ReqListTy::value_type;
   auto Indexer = [&](const T& item) {
     unsigned t = std::round(item.first * rounding_scale);
     // galois::gDebug(item.first, "\t", t, "\n");
@@ -1512,56 +1578,167 @@ public:
   void runAlgo() { exec(); }
 };
 
+/**
+ * Dense parallel execution of FSM
+ */
 template <>
-void FastSweepingMethod<DenseSolver, true, WL>::exec() {
+void FastSweepingMethod<DenseSolver, true, ReqListTy>::exec() {
   galois::GAccumulator<std::size_t> badWork;
   badWork.reset();
 
-  galois::GAccumulator<std::size_t> didWork;
+  galois::GAccumulator<std::size_t> moreWork;
 
   //! Run algo
   std::size_t round = 0;
   do {
     round++;
-    didWork.reset();
+    moreWork.reset();
 #ifdef GALOIS_ENABLE_VTUNE
     galois::runtime::profileVtune(
         [&]() {
 #endif
-          galois::do_all(
-              galois::iterate(std::size_t(0u), NUM_CELLS),
-              [&](const std::size_t& id) {
-                auto const [i, j] = unravel_index(id);
-                auto cur_u        = u(i, j).load(std::memory_order_relaxed);
+          // TODO: level should be signed but have to compare to unsigned
+          // level=i+j from 0 to (nx-1)+(ny-1)
+          for (std::size_t level = 0; level < (nx + ny - 1); level++) {
+            galois::do_all(
+                galois::iterate(
+                    (level > nx - 1 ? level - nx + 1 : std::size_t(0u)),
+                    std::min(std::size_t(ny), level + 1)),
+                [&](const std::size_t& i) {
+                  std::size_t const j = level - i;
+                  galois::gDebug(level, " ", i, " ", j);
 
-                auto const [uN, uS, uE, uW] = gather_neighbors(i, j);
-                auto const uH = std::min(uE, uW), uV = std::min(uN, uS);
-                double const new_u = difference_scheme(f(i, j), dx, uH, uV);
+                  auto cur_u         = u(i, j).load(std::memory_order_relaxed);
+                  data_t const new_u = solve(i, j);
+                  if (std::isnan(new_u))
+                    GALOIS_DIE("Differencing scheme returned NaN. This may "
+                               "result from "
+                               "insufficient precision or from bad input.");
+                  do {
+                    if (new_u >= cur_u)
+                      return;
+                  } while (!u(i, j).compare_exchange_weak(
+                      cur_u, new_u, std::memory_order_relaxed));
 
-                if (std::isnan(new_u))
-                  GALOIS_DIE(
-                      "Differencing scheme returned NaN. This may result from "
-                      "insufficient precision or from bad input.");
+                  if (cur_u != INF)
+                    badWork += 1;
 
-                do {
-                  if (new_u >= cur_u)
-                    return;
-                } while (!u(i, j).compare_exchange_weak(
-                    cur_u, new_u, std::memory_order_relaxed));
+                  if (std::abs(cur_u - new_u) >= tolerance) { // not converged
+                    moreWork += 1;
+                  }
+                },
+                galois::steal(),
+                // galois::no_stats(),
+                galois::chunk_size<CHUNK_SIZE>(),
+                galois::loopname("DenseFSM_I"));
+          }
+          // level=i-j from (ny-1) to (1-nx)
+          for (int64_t level = ny - 1; level > -(int64_t)nx; level--) {
+            galois::do_all(
+                galois::iterate(
+                    (level > 0 ? std::size_t(level) : std::size_t(0u)),
+                    std::min(std::size_t(ny), std::size_t(level + nx))),
+                [&](const std::size_t& i) {
+                  std::size_t const j = i - level;
+                  galois::gDebug(level, " ", i, " ", j);
 
-                if (cur_u != INF)
-                  badWork += 1;
+                  auto cur_u         = u(i, j).load(std::memory_order_relaxed);
+                  data_t const new_u = solve(i, j);
+                  if (std::isnan(new_u))
+                    GALOIS_DIE("Differencing scheme returned NaN. This may "
+                               "result from "
+                               "insufficient precision or from bad input.");
+                  do {
+                    if (new_u >= cur_u)
+                      return;
+                  } while (!u(i, j).compare_exchange_weak(
+                      cur_u, new_u, std::memory_order_relaxed));
 
-                didWork += 1;
-              },
-              galois::steal(),
-              // galois::no_stats(),
-              galois::chunk_size<CHUNK_SIZE>(), galois::loopname("DenseFSM"));
+                  if (cur_u != INF)
+                    badWork += 1;
+
+                  if (std::abs(cur_u - new_u) >= tolerance) { // not converged
+                    moreWork += 1;
+                  }
+                },
+                galois::steal(),
+                // galois::no_stats(),
+                galois::chunk_size<CHUNK_SIZE>(),
+                galois::loopname("DenseFSM_II"));
+          }
+          // level=i+j from (nx-1)+(ny-1) to 0
+          for (std::size_t level = (nx + ny - 2); level + 1 != 0; level--) {
+            galois::do_all(
+                galois::iterate(
+                    (level > nx - 1 ? level - nx + 1 : std::size_t(0u)),
+                    std::min(std::size_t(ny), level + 1)),
+                [&](const std::size_t& i) {
+                  std::size_t const j = level - i;
+                  galois::gDebug(level, " ", i, " ", j);
+
+                  auto cur_u         = u(i, j).load(std::memory_order_relaxed);
+                  data_t const new_u = solve(i, j);
+                  if (std::isnan(new_u))
+                    GALOIS_DIE("Differencing scheme returned NaN. This may "
+                               "result from "
+                               "insufficient precision or from bad input.");
+                  do {
+                    if (new_u >= cur_u)
+                      return;
+                  } while (!u(i, j).compare_exchange_weak(
+                      cur_u, new_u, std::memory_order_relaxed));
+
+                  if (cur_u != INF)
+                    badWork += 1;
+
+                  if (std::abs(cur_u - new_u) >= tolerance) { // not converged
+                    moreWork += 1;
+                  }
+                },
+                galois::steal(),
+                // galois::no_stats(),
+                galois::chunk_size<CHUNK_SIZE>(),
+                galois::loopname("DenseFSM_III"));
+          }
+          // level=i-j from (1-nx) to (ny-1)
+          for (int64_t level = 1 - nx; level < (int64_t)ny; level++) {
+            galois::do_all(
+                galois::iterate(
+                    (level > 0 ? std::size_t(level) : std::size_t(0u)),
+                    std::min(std::size_t(ny), std::size_t(level + nx))),
+                [&](const std::size_t& i) {
+                  std::size_t const j = i - level;
+                  galois::gDebug(level, " ", i, " ", j);
+
+                  auto cur_u         = u(i, j).load(std::memory_order_relaxed);
+                  data_t const new_u = solve(i, j);
+                  if (std::isnan(new_u))
+                    GALOIS_DIE("Differencing scheme returned NaN. This may "
+                               "result from "
+                               "insufficient precision or from bad input.");
+                  do {
+                    if (new_u >= cur_u)
+                      return;
+                  } while (!u(i, j).compare_exchange_weak(
+                      cur_u, new_u, std::memory_order_relaxed));
+
+                  if (cur_u != INF)
+                    badWork += 1;
+
+                  if (std::abs(cur_u - new_u) >= tolerance) { // not converged
+                    moreWork += 1;
+                  }
+                },
+                galois::steal(),
+                // galois::no_stats(),
+                galois::chunk_size<CHUNK_SIZE>(),
+                galois::loopname("DenseFSM_IV"));
+          }
 #ifdef GALOIS_ENABLE_VTUNE
         },
         "FSM_VTune");
 #endif
-  } while (didWork.reduce());
+  } while (moreWork.reduce());
 
   galois::runtime::reportStat_Single("DenseFSM", "Rounds", round);
 
@@ -1580,7 +1757,7 @@ public:
 };
 
 template <>
-void FastSweepingMethod<CSRSolver, true, WL>::exec() {
+void FastSweepingMethod<CSRSolver, true, ReqListTy>::exec() {
   galois::GAccumulator<std::size_t> emptyWork;
   galois::GAccumulator<std::size_t> nonEmptyWork;
   emptyWork.reset();
@@ -1640,7 +1817,7 @@ void FastSweepingMethod<CSRSolver, true, WL>::exec() {
 }
 
 template <>
-void FastSweepingMethod<CSRSolver, false, WL>::exec() {
+void FastSweepingMethod<CSRSolver, false, ReqListTy>::exec() {
   galois::GAccumulator<std::size_t> emptyWork;
   galois::GAccumulator<std::size_t> nonEmptyWork;
   emptyWork.reset();
@@ -1726,7 +1903,7 @@ void run(Args&&... args) {
   Solver<LayoutTy, CONCURRENT, Worklist> solver(std::forward<Args>(args)...);
   //! Boundary assignment and initialization
   // TODO better way for boundary settings?
-  solver.assignBoundary();
+  solver.determineBoundary();
   solver.initBoundary();
 
   //! Go!
@@ -1753,12 +1930,12 @@ int main(int argc, char** argv) noexcept {
       if (useSerial)
         GALOIS_DIE("Serial Dense FMM not implemented yet.");
       else
-        run<FastMarchingMethod, DenseSolver, true, WL>();
+        run<FastMarchingMethod, DenseSolver, true, ReqListTy>();
     } else {
       if (useSerial)
         run<FastMarchingMethod, CSRSolver, false, HeapTy>();
       else
-        run<FastMarchingMethod, CSRSolver, true, WL>();
+        run<FastMarchingMethod, CSRSolver, true, ReqListTy>();
     }
     break;
 
@@ -1767,12 +1944,12 @@ int main(int argc, char** argv) noexcept {
       if (useSerial)
         GALOIS_DIE("Serial Dense FIM not implemented yet.");
       else
-        run<FastIterativeMethod, DenseSolver, true, WL>();
+        run<FastIterativeMethod, DenseSolver, true, ReqListTy>();
     } else {
       if (useSerial)
         GALOIS_DIE("Serial Sparse FIM not implemented yet.");
       else
-        run<FastIterativeMethod, CSRSolver, true, WL>();
+        run<FastIterativeMethod, CSRSolver, true, ReqListTy>();
     }
     break;
 
@@ -1781,12 +1958,12 @@ int main(int argc, char** argv) noexcept {
       if (useSerial)
         GALOIS_DIE("Serial Dense FSM not implemented yet.");
       else
-        run<FastSweepingMethod, DenseSolver, true, WL>();
+        run<FastSweepingMethod, DenseSolver, true, ReqListTy>();
     } else {
       if (useSerial)
         GALOIS_DIE("Serial Sparse FSM not implemented yet.");
       else
-        run<FastSweepingMethod, CSRSolver, true, WL>();
+        run<FastSweepingMethod, CSRSolver, true, ReqListTy>();
     }
     break;
 

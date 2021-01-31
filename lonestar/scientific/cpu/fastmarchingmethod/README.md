@@ -11,6 +11,12 @@ Commandline examples:
 
 ./fmm -inpy=/net/ohm/export/iss/inputs/elastic-marmousi-model/scaled/p_wave_velocity_x4.npy -h=.3125,.3125 -sf=.001 -rf=1 -t=40
 
-./fmm -algo=fmm -inpy=/net/ohm/export/iss/inputs/elastic-marmousi-model/scaled/p_wave_velocity_x1.npy -h=1.25,1.25 -sf=.001 -dense -strict -rf=1 -t=40
+./fmm -algo=fmm -dense -strict -inpy=/net/ohm/export/iss/inputs/elastic-marmousi-model/scaled/p_wave_velocity_x1.npy -h=1.25,1.25 -sf=.001 -rf=1 -t=40
 
 See ./fmm --help for more options.
+
+# Implementation
+FMM DenPar SpPar SpSer
+FSM DenPar SpPar
+FIM DenPar SpPar
+

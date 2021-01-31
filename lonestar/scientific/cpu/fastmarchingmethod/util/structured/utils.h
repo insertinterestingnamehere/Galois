@@ -76,20 +76,34 @@ GNode xyz2id(const data3d_t& coords) {
 /**
  * 2D
  */
-size2d_t id2ij(const std::size_t node) {
-  if (node >= NUM_CELLS)
-    return {};
-  auto res      = std::lldiv(node, nx);
+
+/**
+ * > On many platforms, a single CPU instruction obtains both the quotient and
+ * the remainder, and this function may leverage that, although compilers are
+ * generally able to merge nearby / and % where suitable.
+ */
+size2d_t unravel_index(std::size_t id) noexcept {
+  // TODO: use fastmod for this since it's a repeated operation.
+  // return {id / nx, id % nx};
+  auto res      = std::lldiv(id, nx);
   std::size_t i = res.quot;
   std::size_t j = res.rem;
 
   assert(i < ny && j < nx);
-  return std::array<std::size_t, 2>({i, j});
+  return {i, j};
+};
+size2d_t id2ij(const std::size_t id) {
+  if (id >= NUM_CELLS)
+    return {};
+  return unravel_index(id);
 }
 
+inline std::size_t ravel_index(std::size_t i, std::size_t j) noexcept {
+  return i * nx + j;
+};
 inline std::size_t ij2id(const size2d_t ij) {
   auto [i, j] = ij;
-  return i * nx + j;
+  return ravel_index(i, j);
 }
 
 data2d_t id2xy(const std::size_t node) {
