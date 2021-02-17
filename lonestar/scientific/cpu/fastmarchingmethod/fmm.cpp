@@ -31,6 +31,7 @@
 #include <galois/graphs/FileGraph.h>
 #include <galois/graphs/Graph.h>
 #include <galois/graphs/LCGraph.h>
+#include <galois/DynamicBitset.h>
 
 #ifdef GALOIS_ENABLE_VTUNE
 #include "galois/runtime/Profile.h"
@@ -46,6 +47,8 @@ static char const* url = "";
 
 #include "fastmarchingmethod.h"
 #define DIM_LIMIT 2 // 2-D specific
+
+#define WORK_ITEM_STAT true
 
 enum Algo { fmm = 0, fim, fsm };
 enum SourceType { scatter = 0, analytical };
@@ -84,7 +87,7 @@ static llvm::cl::opt<bool> strict{
 static llvm::cl::opt<bool> conservative{
     "conservative",
     llvm::cl::desc("Alternative method to get determinism: conservative "
-                   "approach to pushing redundant work items"),
+                   "approach to pushing redundant work items (dense FMM only)"),
     llvm::cl::cat(catAlgo)};
 
 static llvm::cl::OptionCategory catInput{"2. Input Options"};
@@ -891,10 +894,12 @@ public:
 template <>
 void FastMarchingMethod<DenseSolver, true, ReqListTy>::exec(
     ReqListTy& initial) {
+#if (WORK_ITEM_STAT)
   galois::GAccumulator<std::size_t> emptyWork;
   galois::GAccumulator<std::size_t> badWork;
   emptyWork.reset();
   badWork.reset();
+#endif
 
   auto indexer = [&](UpdateRequest item) noexcept -> std::size_t {
     return std::round(rounding_scale * item.first);
@@ -909,11 +914,15 @@ void FastMarchingMethod<DenseSolver, true, ReqListTy>::exec(
         auto const [i, j] = unravel_index(work_item.second);
         auto cur_u        = u(i, j).load(std::memory_order_relaxed);
         if (cur_u < work_item.first) {
+#if (WORK_ITEM_STAT)
           emptyWork += 1;
+#endif
           return;
         }
+#if (WORK_ITEM_STAT)
         if (cur_u != INF)
           badWork += 1;
+#endif
         data_t uN, uS, uE, uW, new_u;
         if (conservative) {
           do {
@@ -963,9 +972,11 @@ void FastMarchingMethod<DenseSolver, true, ReqListTy>::exec(
       galois::loopname("DenseFMM"), galois::disable_conflict_detection(),
       galois::wl<OBIM>(indexer));
 
+#if (WORK_ITEM_STAT)
   galois::runtime::reportStat_Single("DenseFMM", "EmptyWork",
                                      emptyWork.reduce());
   galois::runtime::reportStat_Single("DenseFMM", "BadWork", badWork.reduce());
+#endif
 }
 
 // CSR
@@ -1022,10 +1033,12 @@ public:
 
 template <>
 void FastMarchingMethod<CSRSolver, true, ReqListTy>::exec(ReqListTy& wl) {
+#if (WORK_ITEM_STAT)
   galois::GAccumulator<std::size_t> emptyWork;
-  galois::GAccumulator<std::size_t> nonEmptyWork;
+  galois::GAccumulator<std::size_t> badWork;
   emptyWork.reset();
-  nonEmptyWork.reset();
+  badWork.reset();
+#endif
 
   auto PullOp = [&](const auto& item, auto& wl) {
     // using ItemTy = std::remove_cv_t<std::remove_reference_t<decltype(item)>>;
@@ -1086,18 +1099,20 @@ void FastMarchingMethod<CSRSolver, true, ReqListTy>::exec(ReqListTy& wl) {
       "FMM_VTune");
 #endif
 
-  // galois::runtime::reportParam("Statistics", "EmptyWork",
-  // emptyWork.reduce()); galois::runtime::reportParam("Statistics",
-  // "NonEmptyWork",
-  //                              nonEmptyWork.reduce());
+#if (WORK_ITEM_STAT)
+  galois::runtime::reportParam("Statistics", "EmptyWork", emptyWork.reduce());
+  galois::runtime::reportParam("Statistics", "BadWork", badWork.reduce());
+#endif
 }
 
 template <>
 void FastMarchingMethod<CSRSolver, false, HeapTy>::exec(HeapTy& wl) {
+#if (WORK_ITEM_STAT)
   galois::GAccumulator<std::size_t> emptyWork;
-  galois::GAccumulator<std::size_t> nonEmptyWork;
+  galois::GAccumulator<std::size_t> badWork;
   emptyWork.reset();
-  nonEmptyWork.reset();
+  badWork.reset();
+#endif
 
   auto PushOp = [&](const auto& item, auto& wl) {
     // using ItemTy = std::remove_cv_t<std::remove_reference_t<decltype(item)>>;
@@ -1160,10 +1175,10 @@ void FastMarchingMethod<CSRSolver, false, HeapTy>::exec(HeapTy& wl) {
 
   galois::gPrint("#iterarions: ", num_iterations, "\n");
 
-  // galois::runtime::reportParam("Statistics", "EmptyWork",
-  // emptyWork.reduce()); galois::runtime::reportParam("Statistics",
-  // "NonEmptyWork",
-  //                              nonEmptyWork.reduce());
+#if (WORK_ITEM_STAT)
+  galois::runtime::reportParam("Statistics", "EmptyWork", emptyWork.reduce());
+  galois::runtime::reportParam("Statistics", "BadWork", badWork.reduce());
+#endif
 }
 
 /**
@@ -1219,11 +1234,169 @@ public:
 template <>
 void FastIterativeMethod<DenseSolver, true, ReqListTy>::exec(
     std::unique_ptr<ReqListTy>& wl) {
+#if (WORK_ITEM_STAT)
+  galois::GAccumulator<std::size_t> emptyWork;
   galois::GAccumulator<std::size_t> badWork;
+  emptyWork.reset();
   badWork.reset();
+#endif
 
   // Jacobi iteration
   std::unique_ptr<ReqListTy> next(new ReqListTy());
+
+  /**
+   * Option 1: Allowing repetitive pushes w/o checking if it's in worklist
+   */
+  [[maybe_unused]] auto stateless_op = [&](const auto& work_item) {
+    auto [old_u, id] = work_item;
+    assert(id < NUM_CELLS && "Ghost Point!");
+    auto const [i, j] = unravel_index(id);
+
+    auto cur_u = u(i, j).load(std::memory_order_relaxed);
+    if (cur_u < old_u) {
+#if (WORK_ITEM_STAT)
+      emptyWork += 1;
+#endif
+      return;
+    }
+    data_t const new_u = solve(i, j);
+    if (std::isnan(new_u))
+      GALOIS_DIE("Differencing scheme returned NaN. This may result from "
+                 "insufficient precision or from bad input.");
+    do {
+      if (new_u > cur_u)
+        return;
+    } while (!u(i, j).compare_exchange_weak(cur_u, new_u,
+                                            std::memory_order_relaxed));
+#if (WORK_ITEM_STAT)
+    if (cur_u != INF) {
+      badWork += 1;
+    }
+#endif
+
+    // "decreased" semantics implemented as "changed" due to
+    // finite precision
+    if (std::abs(cur_u - new_u) >= tolerance) { // not converged
+      next->push(UpdateRequest{new_u, id});
+      return;
+    }
+
+    for (auto [valid, ii, jj] : neighbors(i, j)) {
+      if (!valid) // XXX: cannot identify those already in worklist
+        continue;
+      // TODO: similar code repeated
+      auto cur_u         = u(ii, jj).load(std::memory_order_relaxed);
+      data_t const new_u = solve(ii, jj);
+      if (std::isnan(new_u))
+        GALOIS_DIE("Differencing scheme returned NaN. This may "
+                   "result from "
+                   "insufficient precision or from bad input.");
+      do {
+        if (new_u > cur_u)
+          goto fim_next_neighbor;
+      } while (!u(ii, jj).compare_exchange_weak(cur_u, new_u,
+                                                std::memory_order_relaxed));
+#if (WORK_ITEM_STAT)
+      if (cur_u != INF) {
+        badWork += 1;
+      }
+#endif
+
+      // "decreased" semantics implemented as "changed" due to
+      // finite precision
+      if (std::abs(cur_u - new_u)) {
+        next->push(UpdateRequest{new_u, ravel_index(ii, jj)});
+      }
+    fim_next_neighbor:
+      continue;
+    }
+  }; // end of stateless_op
+
+  /**
+   * Option 2: Maintaining state flag for checking if a node is in worklist
+   */
+  [[maybe_unused]] galois::DynamicBitSet isInWorkList;
+  isInWorkList.resize(NUM_CELLS);
+  isInWorkList.reset();
+  galois::do_all(
+      galois::iterate(wl->begin(), wl->end()),
+      [&](const auto& work_item) {
+        [[maybe_unused]] auto [prio, id] = work_item;
+        isInWorkList.set(id);
+        return;
+      },
+      // galois::steal(),
+      // galois::no_stats(),
+      // galois::chunk_size<CHUNK_SIZE>(),
+      galois::loopname("DenseFIM_initFlags"));
+  [[maybe_unused]] auto stateful_op = [&](const auto& work_item) {
+    auto [old_u, id] = work_item;
+    assert(id < NUM_CELLS && "Ghost Point!");
+    if (!isInWorkList.reset(id))
+      GALOIS_DIE("was not marked in list");
+    auto const [i, j] = unravel_index(id);
+
+    auto cur_u = u(i, j).load(std::memory_order_relaxed);
+    if (cur_u < old_u) {
+#if (WORK_ITEM_STAT)
+      emptyWork += 1;
+#endif
+      galois::gWarn("Repeated item in worklist"); // No node locks
+    }
+    data_t const new_u = solve(i, j);
+    if (std::isnan(new_u))
+      GALOIS_DIE("Differencing scheme returned NaN. This may result from "
+                 "insufficient precision or from bad input.");
+    do {
+      if (new_u > cur_u)
+        return;
+    } while (!u(i, j).compare_exchange_weak(cur_u, new_u,
+                                            std::memory_order_relaxed));
+#if (WORK_ITEM_STAT)
+    if (cur_u != INF) {
+      badWork += 1;
+    }
+#endif
+
+    // "decreased" semantics implemented as "changed" due to
+    // finite precision
+    if (std::abs(cur_u - new_u) >= tolerance) { // not converged
+      if (!isInWorkList.set(id))
+        next->push(UpdateRequest{new_u, id});
+      return;
+    }
+
+    for (auto [valid, ii, jj] : neighbors(i, j)) {
+      if (!valid || isInWorkList.test(ravel_index(ii, jj)))
+        continue;
+      // TODO: similar code repeated
+      auto cur_u         = u(ii, jj).load(std::memory_order_relaxed);
+      data_t const new_u = solve(ii, jj);
+      if (std::isnan(new_u))
+        GALOIS_DIE("Differencing scheme returned NaN. This may "
+                   "result from "
+                   "insufficient precision or from bad input.");
+      do {
+        if (new_u > cur_u)
+          goto fim_next_neighbor;
+      } while (!u(ii, jj).compare_exchange_weak(cur_u, new_u,
+                                                std::memory_order_relaxed));
+#if (WORK_ITEM_STAT)
+      if (cur_u != INF) {
+        badWork += 1;
+      }
+#endif
+
+      // "decreased" semantics implemented as "changed" due to
+      // finite precision
+      if (std::abs(cur_u - new_u)) {
+        if (!isInWorkList.set(ravel_index(ii, jj)))
+          next->push(UpdateRequest{new_u, ravel_index(ii, jj)});
+      }
+    fim_next_neighbor:
+      continue;
+    }
+  }; // end of stateful_op
 
   //! Run algo
   std::size_t round = 0;
@@ -1233,69 +1406,11 @@ void FastIterativeMethod<DenseSolver, true, ReqListTy>::exec(
     galois::runtime::profileVtune(
         [&]() {
 #endif
-          galois::do_all(
-              galois::iterate(wl->begin(), wl->end()),
-              [&](const auto& work_item) {
-                auto [old_u, id] = work_item;
-                assert(id < NUM_CELLS && "Ghost Point!");
-                auto const [i, j] = unravel_index(id);
-
-                auto cur_u = u(i, j).load(std::memory_order_relaxed);
-                if (cur_u < old_u) { // empty
-                  return;
-                }
-                data_t const new_u = solve(i, j);
-                if (std::isnan(new_u))
-                  GALOIS_DIE(
-                      "Differencing scheme returned NaN. This may result from "
-                      "insufficient precision or from bad input.");
-                do {
-                  if (new_u > cur_u)
-                    return;
-                } while (!u(i, j).compare_exchange_weak(
-                    cur_u, new_u, std::memory_order_relaxed));
-                if (cur_u != INF) {
-                  badWork += 1;
-                }
-
-                // "decreased" semantics implemented as "changed" due to
-                // finite precision
-                if (std::abs(cur_u - new_u) >= tolerance) { // not converged
-                  next->push(UpdateRequest{new_u, id});
-                  return;
-                }
-
-                for (auto [valid, ii, jj] : neighbors(i, j)) {
-                  if (!valid) // TODO: or in the work list
-                    continue;
-                  // TODO: similar code repeated
-                  auto cur_u = u(ii, jj).load(std::memory_order_relaxed);
-                  data_t const new_u = solve(ii, jj);
-                  if (std::isnan(new_u))
-                    GALOIS_DIE("Differencing scheme returned NaN. This may "
-                               "result from "
-                               "insufficient precision or from bad input.");
-                  do {
-                    if (new_u > cur_u)
-                      goto fim_next_neighbor;
-                  } while (!u(ii, jj).compare_exchange_weak(
-                      cur_u, new_u, std::memory_order_relaxed));
-                  if (cur_u != INF) {
-                    badWork += 1;
-                  }
-
-                  // "decreased" semantics implemented as "changed" due to
-                  // finite precision
-                  if (std::abs(cur_u - new_u)) {
-                    next->push(UpdateRequest{new_u, ravel_index(ii, jj)});
-                  }
-                fim_next_neighbor:
-                  continue;
-                }
-              },
-              galois::steal(),
-              // galois::no_stats(),
-              galois::chunk_size<CHUNK_SIZE>(), galois::loopname("DenseFIM"));
+          galois::do_all(galois::iterate(wl->begin(), wl->end()), stateless_op,
+                         galois::steal(),
+                         // galois::no_stats(),
+                         galois::chunk_size<CHUNK_SIZE>(),
+                         galois::loopname("DenseFIM"));
 #ifdef GALOIS_ENABLE_VTUNE
         },
         "FIM_VTune");
@@ -1304,9 +1419,12 @@ void FastIterativeMethod<DenseSolver, true, ReqListTy>::exec(
     wl.swap(next);
   }
 
-  galois::runtime::reportStat_Single("DenseFSM", "Rounds", round);
-
-  galois::runtime::reportStat_Single("DenseFSM", "BadWork", badWork.reduce());
+  galois::runtime::reportStat_Single("DenseFIM", "Rounds", round);
+#if (WORK_ITEM_STAT)
+  galois::runtime::reportStat_Single("DenseFIM", "EmptyWork",
+                                     emptyWork.reduce());
+  galois::runtime::reportStat_Single("DenseFIM", "BadWork", badWork.reduce());
+#endif
 }
 
 template <bool CONCURRENT, typename WorkListTy>
@@ -1365,10 +1483,12 @@ public:
 
 template <>
 void FastIterativeMethod<CSRSolver, true, ReqListTy>::exec(ReqListTy* wl) {
+#if (WORK_ITEM_STAT)
   galois::GAccumulator<std::size_t> emptyWork;
-  galois::GAccumulator<std::size_t> nonEmptyWork;
+  galois::GAccumulator<std::size_t> badWork;
   emptyWork.reset();
-  nonEmptyWork.reset();
+  badWork.reset();
+#endif
 
   // Jacobi iteration
   ReqListTy* next = new ReqListTy();
@@ -1459,18 +1579,20 @@ void FastIterativeMethod<CSRSolver, true, ReqListTy>::exec(ReqListTy* wl) {
 
   delete next;
 
-  // galois::runtime::reportParam("Statistics", "EmptyWork",
-  // emptyWork.reduce()); galois::runtime::reportParam("Statistics",
-  // "NonEmptyWork",
-  //                              nonEmptyWork.reduce());
+#if (WORK_ITEM_STAT)
+  galois::runtime::reportParam("Statistics", "EmptyWork", emptyWork.reduce());
+  galois::runtime::reportParam("Statistics", "BadWork", badWork.reduce());
+#endif
 }
 
 template <>
 void FastIterativeMethod<CSRSolver, false, HeapTy>::exec(HeapTy* wl) {
+#if (WORK_ITEM_STAT)
   galois::GAccumulator<std::size_t> emptyWork;
-  galois::GAccumulator<std::size_t> nonEmptyWork;
+  galois::GAccumulator<std::size_t> badWork;
   emptyWork.reset();
-  nonEmptyWork.reset();
+  badWork.reset();
+#endif
 
   // Jacobi iteration
   HeapTy* next = new HeapTy();
@@ -1553,10 +1675,10 @@ void FastIterativeMethod<CSRSolver, false, HeapTy>::exec(HeapTy* wl) {
 
   galois::gPrint("#iterarions: ", num_iterations, "\n");
 
-  // galois::runtime::reportParam("Statistics", "EmptyWork",
-  // emptyWork.reduce()); galois::runtime::reportParam("Statistics",
-  // "NonEmptyWork",
-  //                              nonEmptyWork.reduce());
+#if (WORK_ITEM_STAT)
+  galois::runtime::reportParam("Statistics", "EmptyWork", emptyWork.reduce());
+  galois::runtime::reportParam("Statistics", "BadWork", badWork.reduce());
+#endif
 }
 
 /**
@@ -1583,8 +1705,11 @@ public:
  */
 template <>
 void FastSweepingMethod<DenseSolver, true, ReqListTy>::exec() {
+#if (WORK_ITEM_STAT)
+  // Topology driven - no "empty" work
   galois::GAccumulator<std::size_t> badWork;
   badWork.reset();
+#endif
 
   galois::GAccumulator<std::size_t> moreWork;
 
@@ -1620,8 +1745,10 @@ void FastSweepingMethod<DenseSolver, true, ReqListTy>::exec() {
                   } while (!u(i, j).compare_exchange_weak(
                       cur_u, new_u, std::memory_order_relaxed));
 
+#if (WORK_ITEM_STAT)
                   if (cur_u != INF)
                     badWork += 1;
+#endif
 
                   if (std::abs(cur_u - new_u) >= tolerance) { // not converged
                     moreWork += 1;
@@ -1654,8 +1781,10 @@ void FastSweepingMethod<DenseSolver, true, ReqListTy>::exec() {
                   } while (!u(i, j).compare_exchange_weak(
                       cur_u, new_u, std::memory_order_relaxed));
 
+#if (WORK_ITEM_STAT)
                   if (cur_u != INF)
                     badWork += 1;
+#endif
 
                   if (std::abs(cur_u - new_u) >= tolerance) { // not converged
                     moreWork += 1;
@@ -1688,8 +1817,10 @@ void FastSweepingMethod<DenseSolver, true, ReqListTy>::exec() {
                   } while (!u(i, j).compare_exchange_weak(
                       cur_u, new_u, std::memory_order_relaxed));
 
+#if (WORK_ITEM_STAT)
                   if (cur_u != INF)
                     badWork += 1;
+#endif
 
                   if (std::abs(cur_u - new_u) >= tolerance) { // not converged
                     moreWork += 1;
@@ -1722,8 +1853,10 @@ void FastSweepingMethod<DenseSolver, true, ReqListTy>::exec() {
                   } while (!u(i, j).compare_exchange_weak(
                       cur_u, new_u, std::memory_order_relaxed));
 
+#if (WORK_ITEM_STAT)
                   if (cur_u != INF)
                     badWork += 1;
+#endif
 
                   if (std::abs(cur_u - new_u) >= tolerance) { // not converged
                     moreWork += 1;
@@ -1742,7 +1875,9 @@ void FastSweepingMethod<DenseSolver, true, ReqListTy>::exec() {
 
   galois::runtime::reportStat_Single("DenseFSM", "Rounds", round);
 
+#if (WORK_ITEM_STAT)
   galois::runtime::reportStat_Single("DenseFSM", "BadWork", badWork.reduce());
+#endif
 }
 
 template <bool CONCURRENT, typename WorkListTy>
@@ -1758,10 +1893,12 @@ public:
 
 template <>
 void FastSweepingMethod<CSRSolver, true, ReqListTy>::exec() {
+#if (WORK_ITEM_STAT)
   galois::GAccumulator<std::size_t> emptyWork;
-  galois::GAccumulator<std::size_t> nonEmptyWork;
+  galois::GAccumulator<std::size_t> badWork;
   emptyWork.reset();
-  nonEmptyWork.reset();
+  badWork.reset();
+#endif
 
   galois::GAccumulator<std::size_t> didWork;
 
@@ -1810,18 +1947,20 @@ void FastSweepingMethod<CSRSolver, true, ReqListTy>::exec() {
 #endif
   } while (didWork.reduce());
 
-  // galois::runtime::reportParam("Statistics", "EmptyWork",
-  // emptyWork.reduce()); galois::runtime::reportParam("Statistics",
-  // "NonEmptyWork",
-  //                              nonEmptyWork.reduce());
+#if (WORK_ITEM_STAT)
+  galois::runtime::reportParam("Statistics", "EmptyWork", emptyWork.reduce());
+  galois::runtime::reportParam("Statistics", "BadWork", badWork.reduce());
+#endif
 }
 
 template <>
 void FastSweepingMethod<CSRSolver, false, ReqListTy>::exec() {
+#if (WORK_ITEM_STAT)
   galois::GAccumulator<std::size_t> emptyWork;
-  galois::GAccumulator<std::size_t> nonEmptyWork;
+  galois::GAccumulator<std::size_t> badWork;
   emptyWork.reset();
-  nonEmptyWork.reset();
+  badWork.reset();
+#endif
 
   galois::GAccumulator<std::size_t> didWork;
 
@@ -1891,10 +2030,10 @@ void FastSweepingMethod<CSRSolver, false, ReqListTy>::exec() {
   galois::gPrint("#iterarions: ", num_iterations, "\n");
   */
 
-  // galois::runtime::reportParam("Statistics", "EmptyWork",
-  // emptyWork.reduce()); galois::runtime::reportParam("Statistics",
-  // "NonEmptyWork",
-  //                              nonEmptyWork.reduce());
+#if (WORK_ITEM_STAT)
+  galois::runtime::reportParam("Statistics", "EmptyWork", emptyWork.reduce());
+  galois::runtime::reportParam("Statistics", "BadWork", badWork.reduce());
+#endif
 }
 
 template <template <typename, bool, typename> class Solver, typename LayoutTy,
