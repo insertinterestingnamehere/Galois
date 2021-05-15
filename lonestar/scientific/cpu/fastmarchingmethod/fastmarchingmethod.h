@@ -16,6 +16,8 @@
  * including but not limited to those resulting from defects in Software and/or
  * Documentation, or loss or inaccuracy of data of any kind.
  */
+#pragma GCC diagnostic ignored "-Wunused-variable"
+
 using data_t = double;
 #include <limits>
 constexpr data_t INF = std::numeric_limits<data_t>::infinity();

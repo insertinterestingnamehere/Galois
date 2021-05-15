@@ -1133,14 +1133,18 @@ void FastMarchingMethod<CSRSolver, false, HeapTy>::exec(HeapTy& wl) {
     for (auto e : graph.edges(node, UNPROTECTED)) {
       GNode dst = graph.getEdgeDst(e);
 
-      if (dst >= NUM_CELLS)
+      if (dst >= NUM_CELLS) {
         continue;
+      }
       auto& dstData = graph.getData(dst, UNPROTECTED);
 
       // Given that the arrival time propagation is non-descending
       data_t old_neighbor_val =
           dstData.solution.load(std::memory_order_relaxed);
       if (old_neighbor_val <= cur_val) {
+#if (WORK_ITEM_STAT)
+        emptyWork += 1;
+#endif
         continue;
       }
 
@@ -1149,10 +1153,18 @@ void FastMarchingMethod<CSRSolver, false, HeapTy>::exec(HeapTy& wl) {
                       graph.edge_end(dst, UNPROTECTED));
 
       do {
-        if (sln_temp >= old_neighbor_val)
+        if (sln_temp >= old_neighbor_val){
+#if (WORK_ITEM_STAT)
+          emptyWork += 1;
+#endif
           goto continue_outer;
+        }
       } while (!dstData.solution.compare_exchange_weak(
           old_neighbor_val, sln_temp, std::memory_order_relaxed));
+#if (WORK_ITEM_STAT)
+      if (!std::isinf(old_neighbor_val))
+        badWork += 1;
+#endif
       wl.push(UpdateRequest{sln_temp, dst}, old_neighbor_val);
     continue_outer:;
     }
@@ -1179,6 +1191,14 @@ void FastMarchingMethod<CSRSolver, false, HeapTy>::exec(HeapTy& wl) {
   galois::runtime::reportParam("Statistics", "EmptyWork", emptyWork.reduce());
   galois::runtime::reportParam("Statistics", "BadWork", badWork.reduce());
 #endif
+}
+
+template<>
+void FastMarchingMethod<CSRSolver, false, HeapTy>::runAlgo() {
+  HeapTy initial;
+  initial.push(std::pair<double, unsigned int>(0., 0u));
+
+  exec(initial);
 }
 
 /**
@@ -1923,6 +1943,7 @@ void FastSweepingMethod<CSRSolver, true, ReqListTy>::exec() {
     auto [new_val, adj_data] =
         quickUpdate(curData, graph.edge_begin(node, UNPROTECTED),
                     graph.edge_end(node, UNPROTECTED));
+
     if (galois::atomicMin(curData.solution, new_val) > new_val) {
       galois::gDebug("not converged:", new_val, " ", node);
       didWork += 1;
